@@ -18,8 +18,7 @@ st.title("Forecast of City Gas Supply by Product and Usage Type")
 st.caption("3차 다항식(기온↔공급량) 기반 월별 예측 · 데이터 소스: Excel")
 
 # Matplotlib 폰트 캐시 경로(권한 문제 방지)
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
-st.set_option("deprecation.showPyplotGlobalUse", False)
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib"
 
 # ─────────────────────────────────────────────────────────────
 # 한글 폰트(가능하면 적용, 실패해도 실행)
