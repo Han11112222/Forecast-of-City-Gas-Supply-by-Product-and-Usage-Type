@@ -1,12 +1,10 @@
 # app.py — 도시가스 공급·판매 분석 (Poly-3)
 # 분석 유형: ① 공급량 분석(기온↔공급량) ② 판매량 분석(냉방용, 검침기간 평균기온)
-# 요구 반영:
-#  - '데이터' 시트만 사용(공급량)
-#  - 기온 컬럼 자동탐지
-#  - 예측 시작/종료는 '연·월'만 선택/표시
-#  - 연도 표시는 콤마 없이
-#  - 총공급량은 합계가 아닌 별도 모델 예측
-#  - 판매량(냉방용): 판매 엑셀 + 일별 기온 RAW 업로드, 전월16~당월15 평균기온으로 학습/예측
+# 반영사항:
+#  - 기온 RAW 엑셀: 헤더(열 제목) 자동 추정해서 '날짜'·'평균기온(℃)/기온' 잡기
+#  - 한글 폰트 강제 적용(로컬 fonts/ 및 OS 폰트 탐색)
+#  - 모든 시계열 그래프 X축을 1월~12월 표기로 표시
+#  - 예측 시작/종료 '연·월' UI 유지, 연도 표시는 콤마 없이
 
 import os
 from pathlib import Path
@@ -14,11 +12,12 @@ import numpy as np
 import pandas as pd
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
 import streamlit as st
 
-# 기본 설정
+# ───────── 기본 페이지 ─────────
 st.set_page_config(page_title="도시가스 공급·판매 분석 (Poly-3)", layout="wide")
 st.title("도시가스 공급·판매 분석 (Poly-3)")
 st.caption("공급량: 기온↔공급량 3차 다항식 · 판매량(냉방용): 검침기간 평균기온 기반")
@@ -26,26 +25,40 @@ st.caption("공급량: 기온↔공급량 3차 다항식 · 판매량(냉방용)
 # Matplotlib 캐시(권한 이슈 방지)
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
-# 한글 폰트(가능하면 적용)
-def set_korean_font():
-    candidates = [
+# ───────── 한글 폰트(강제) ─────────
+def set_korean_font_strict():
+    # 1) 로컬 리포 내 폰트 우선
+    local_candidates = [
+        "assets/fonts/NanumGothic.ttf",
+        "assets/fonts/NotoSansKR-Regular.otf",
+        "fonts/NanumGothic.ttf",
+        "fonts/NotoSansKR-Regular.otf",
+    ]
+    # 2) OS 폰트
+    system_candidates = [
         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+        "/Library/Fonts/AppleSDGothicNeo.ttc",
+        "C:/Windows/Fonts/malgun.ttf",
     ]
-    for p in candidates:
+    chosen = None
+    for p in local_candidates + system_candidates:
         try:
             if os.path.exists(p):
                 mpl.font_manager.fontManager.addfont(p)
-                plt.rcParams["font.family"] = mpl.font_manager.FontProperties(fname=p).get_name()
+                chosen = mpl.font_manager.FontProperties(fname=p).get_name()
                 break
         except Exception:
             pass
+    if chosen is None:
+        # 폰트를 못 찾으면 시스템 기본(영문)이라도 설정
+        chosen = plt.rcParams.get("font.family", ["DejaVu Sans"])[0]
+    plt.rcParams["font.family"] = chosen
     plt.rcParams["axes.unicode_minus"] = False
 
-set_korean_font()
+set_korean_font_strict()
 
-# ────────── 공통 유틸 ──────────
+# ───────── 공통 유틸 ─────────
 META_COLS = {"날짜", "일자", "date", "연", "년", "월"}
 TEMP_HINTS = ["평균기온", "기온", "temperature", "temp"]
 
@@ -56,6 +69,7 @@ KNOWN_PRODUCT_ORDER = [
 def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
+    # 날짜 열 생성
     if "날짜" in df.columns:
         df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
     elif "일자" in df.columns:
@@ -66,6 +80,8 @@ def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
         if ("연" in df.columns or "년" in df.columns) and "월" in df.columns:
             y = df["연"] if "연" in df.columns else df["년"]
             df["날짜"] = pd.to_datetime(y.astype(str) + "-" + df["월"].astype(str) + "-01", errors="coerce")
+
+    # 연/월 파생
     if "연" not in df.columns:
         if "년" in df.columns:
             df["연"] = df["년"]
@@ -73,9 +89,14 @@ def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
             df["연"] = df["날짜"].dt.year
     if "월" not in df.columns and "날짜" in df.columns:
         df["월"] = df["날짜"].dt.month
+
+    # 숫자형 변환(콤마/공백 제거)
     for c in df.columns:
         if df[c].dtype == "object":
-            df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", "").str.replace(" ", ""), errors="ignore")
+            df[c] = pd.to_numeric(
+                df[c].astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False),
+                errors="ignore"
+            )
     return df
 
 def detect_temp_col(df: pd.DataFrame) -> str | None:
@@ -105,6 +126,71 @@ def read_excel_sheet(path_or_file, prefer_sheet: str = "데이터"):
         df = pd.read_excel(path_or_file, engine="openpyxl")
     return normalize_cols(df)
 
+# ▶ 기온 RAW 전용: 헤더 자동 추정
+@st.cache_data(ttl=600)
+def read_temperature_raw(file):
+    def _finalize(df):
+        df.columns = [str(c).strip() for c in df.columns]
+        # 다양한 표기 대응: 평균기온(℃) → 평균기온
+        rename_map = {}
+        for c in df.columns:
+            if "평균기온" in c:
+                rename_map[c] = "평균기온"
+            elif c.strip().lower() in ["temp", "temperature"]:
+                rename_map[c] = "평균기온"
+        if rename_map:
+            df = df.rename(columns=rename_map)
+        # 날짜/기온 열 찾기
+        date_col = None
+        for c in df.columns:
+            if str(c).lower() in ["날짜","일자","date"]:
+                date_col = c; break
+        if date_col is None:
+            # 날짜처럼 보이는 첫 번째 열 사용 시도
+            for c in df.columns:
+                try:
+                    pd.to_datetime(df[c], errors="raise")
+                    date_col = c; break
+                except Exception:
+                    continue
+        temp_col = None
+        for c in df.columns:
+            if ("평균기온" in str(c)) or ("기온" in str(c).replace("(℃)","")) or (str(c).lower() in ["temp","temperature"]):
+                temp_col = c; break
+        if date_col is None or temp_col is None:
+            return None
+        out = pd.DataFrame({
+            "일자": pd.to_datetime(df[date_col], errors="coerce"),
+            "기온": pd.to_numeric(df[temp_col], errors="coerce")
+        }).dropna()
+        return out.sort_values("일자").reset_index(drop=True)
+
+    name = getattr(file, "name", str(file))
+    if name.lower().endswith(".csv"):
+        raw = pd.read_csv(file)
+        done = _finalize(raw)
+        return done
+
+    # Excel: 헤더 자동탐지
+    xls = pd.ExcelFile(file, engine="openpyxl")
+    sheet = xls.sheet_names[0]
+    # 먼저 헤더 없이 읽고(상위 50행만 스캔)
+    head = pd.read_excel(xls, sheet_name=sheet, header=None, nrows=50)
+    header_row = None
+    for i in range(len(head)):
+        row_vals = [str(v) for v in head.iloc[i].tolist()]
+        has_date = any(v in ["날짜", "일자", "date", "Date"] for v in row_vals)
+        has_temp = any(("평균기온" in v) or ("기온" in v) or (v.lower() in ["temp","temperature"]) for v in row_vals if isinstance(v, str))
+        if has_date and has_temp:
+            header_row = i
+            break
+    if header_row is None:
+        # 헤더가 못 잡히면 기본 읽기
+        df = pd.read_excel(xls, sheet_name=sheet)
+    else:
+        df = pd.read_excel(xls, sheet_name=sheet, header=header_row)
+    return _finalize(df)
+
 def month_start(x) -> pd.Timestamp:
     x = pd.to_datetime(x)
     return pd.Timestamp(x.year, x.month, 1)
@@ -124,7 +210,6 @@ def fit_poly3_and_predict(x_train: np.ndarray, y_train: np.ndarray, x_future: np
     return y_future, r2
 
 def ym_picker(label: str, default: pd.Timestamp):
-    """연·월만 선택하는 UI(연/월 selectbox 조합) → pd.Timestamp(YYYY-MM-01) 반환"""
     c1, c2 = st.columns(2)
     with c1:
         year = st.selectbox(f"{label} — 연", options=list(range(2010, 2036)), index=list(range(2010,2036)).index(int(default.year)))
@@ -132,7 +217,14 @@ def ym_picker(label: str, default: pd.Timestamp):
         month = st.selectbox(f"{label} — 월", options=list(range(1, 13)), index=int(default.month)-1)
     return pd.Timestamp(year=int(year), month=int(month), day=1)
 
-# ────────── 좌측바: 분석 유형 ──────────
+# X축을 1~12월로 표시
+def apply_month_ticks(ax):
+    ax.xaxis.set_major_locator(mdates.MonthLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m월'))
+    for label in ax.get_xticklabels():
+        label.set_rotation(0)
+
+# ───────── 좌측바: 분석 유형 ─────────
 with st.sidebar:
     st.header("분석 유형")
     mode = st.radio("선택", ["공급량 분석", "판매량 분석(냉방용)"], index=0)
@@ -165,7 +257,7 @@ if mode == "공급량 분석":
         # 학습 연도
         st.subheader("학습 데이터 연도 선택")
         years = sorted([int(y) for y in pd.Series(df["연"]).dropna().unique()])
-        sel_years = st.multiselect("연도 선택", years, default=years, help="필요 없는 연도는 ×로 제거")
+        sel_years = st.multiselect("연도 선택", years, default=years)
 
         # 기온 자동탐지
         temp_col = detect_temp_col(df)
@@ -187,8 +279,7 @@ if mode == "공급량 분석":
         forecast_start = ym_picker("예측 시작", default_start)
         forecast_end   = ym_picker("예측 종료", default_end)
         if forecast_end < forecast_start:
-            st.error("예측 종료가 시작보다 빠릅니다.")
-            st.stop()
+            st.error("예측 종료가 시작보다 빠릅니다."); st.stop()
 
         scen = st.radio("기온 시나리오", ["학습기간 월별 평균", "학습 마지막해 월별 복사", "사용자 업로드(월·기온)"], index=0)
         delta = st.slider("기온 보정(Δ°C)", -5.0, 5.0, 0.0, step=0.1)
@@ -254,11 +345,14 @@ if mode == "공급량 분석":
         merged = pd.merge(hist[["YM", col]].rename(columns={col:"실제"}), pred[["YM","예측공급량"]].rename(columns={"예측공급량":"예측"}), on="YM", how="outer").sort_values("YM")
 
         fig = plt.figure(figsize=(9, 3.6))
-        plt.plot(merged["YM"], merged["실제"], label=f"{col} 실제")
-        plt.plot(merged["YM"], merged["예측"], linestyle="--", label=f"{col} 예측")
-        plt.title(f"{col} — Poly-3 Forecast (Train R²={r2:.3f})")
-        plt.xlabel("연·월"); plt.ylabel("공급량"); plt.legend(loc="best"); plt.tight_layout()
-        st.pyplot(fig)
+        ax = plt.gca()
+        ax.plot(merged["YM"], merged["실제"], label=f"{col} 실제")
+        ax.plot(merged["YM"], merged["예측"], linestyle="--", label=f"{col} 예측")
+        apply_month_ticks(ax)
+        ax.set_title(f"{col} — Poly-3 Forecast (Train R²={r2:.3f})")
+        ax.set_xlabel("월"); ax.set_ylabel("공급량"); ax.legend(loc="best")
+        plt.tight_layout()
+        st.pyplot(fig, clear_figure=True)
 
     if not results:
         st.error("예측할 상품이 선택되지 않았거나 데이터 형식이 맞지 않습니다."); st.stop()
@@ -326,34 +420,10 @@ else:
     sales_df["판매량"] = pd.to_numeric(sales_df[sales_value_col], errors="coerce")
     sales_df = sales_df.dropna(subset=["판매월","판매량"]).copy()
 
-    # 기온 RAW
-    if temp_raw_file.name.lower().endswith(".csv"):
-        temp_raw = pd.read_csv(temp_raw_file)
-    else:
-        temp_raw = read_excel_sheet(temp_raw_file, prefer_sheet="데이터")
-    temp_raw.columns = [str(c).strip() for c in temp_raw.columns]
-
-    # 날짜/기온 컬럼 탐지
-    temp_date_col = None
-    for c in temp_raw.columns:
-        if str(c).lower() in ["날짜","일자","date"]:
-            temp_date_col = c; break
-    if temp_date_col is None:
-        for c in temp_raw.columns:
-            try:
-                pd.to_datetime(temp_raw[c]); temp_date_col = c; break
-            except Exception:
-                pass
-    temp_value_col = None
-    for c in temp_raw.columns:
-        if any(k in str(c) for k in ["평균기온", "기온", "temp"]):
-            temp_value_col = c; break
-    if temp_date_col is None or temp_value_col is None:
+    # ▶ 기온 RAW: 헤더 자동 추정 사용
+    temp_raw = read_temperature_raw(temp_raw_file)
+    if temp_raw is None or temp_raw.empty:
         st.error("기온 RAW에서 날짜/기온 컬럼을 찾지 못했습니다. (예: 날짜, 평균기온)"); st.stop()
-
-    temp_raw["일자"] = pd.to_datetime(temp_raw[temp_date_col], errors="coerce")
-    temp_raw["기온"] = pd.to_numeric(temp_raw[temp_value_col], errors="coerce")
-    temp_raw = temp_raw.dropna(subset=["일자","기온"]).sort_values("일자")
 
     # 학습 연도 선택(UI)
     st.subheader("학습 데이터 연도 선택")
@@ -427,12 +497,15 @@ else:
         mime="text/csv",
     )
 
-    # 차트(실제 vs 예측)
+    # 차트(실제 vs 예측) — X축 월 표기
     chart_df = compare.copy()
     chart_df["YM"] = pd.to_datetime(chart_df["연"].astype(str) + "-" + chart_df["월"].astype(str) + "-01")
     fig = plt.figure(figsize=(9, 3.6))
-    plt.plot(chart_df["YM"], chart_df["판매량"], label="실제 판매량")
-    plt.plot(chart_df["YM"], chart_df["예측판매량"], linestyle="--", label="예측 판매량")
-    plt.title(f"냉방용 판매량 — Poly-3 (Train R²={r2_fit:.3f})")
-    plt.xlabel("연·월"); plt.ylabel("판매량"); plt.legend(loc="best"); plt.tight_layout()
-    st.pyplot(fig)
+    ax = plt.gca()
+    ax.plot(chart_df["YM"], chart_df["판매량"], label="실제 판매량")
+    ax.plot(chart_df["YM"], chart_df["예측판매량"], linestyle="--", label="예측 판매량")
+    apply_month_ticks(ax)
+    ax.set_title(f"냉방용 판매량 — Poly-3 (Train R²={r2_fit:.3f})")
+    ax.set_xlabel("월"); ax.set_ylabel("판매량"); ax.legend(loc="best")
+    plt.tight_layout()
+    st.pyplot(fig, clear_figure=True)
