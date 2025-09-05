@@ -230,35 +230,46 @@ def predict_poly3(model, poly, x):
 # ===== 델타 T(±0.5) — 즉시 반영 버튼 =====
 st.title("도시가스 공급·판매 분석 (Poly-3)")
 
+# ===== ΔT(±0.5) — 즉시 반영 버튼 (DuplicateWidgetID 방지) =====
 st.subheader("ΔT 시나리오 (℃)")
-if "dt_normal" not in st.session_state: st.session_state.dt_normal = 0.0
-if "dt_best" not in st.session_state: st.session_state.dt_best = -0.0
-if "dt_cons" not in st.session_state: st.session_state.dt_cons = +0.0
 
-def minus(key): st.session_state[key] = round(st.session_state[key] - 0.5, 2)
-def plus(key): st.session_state[key] = round(st.session_state[key] + 0.5, 2)
+for k in ["dt_normal", "dt_best", "dt_cons"]:
+    if k not in st.session_state:
+        st.session_state[k] = 0.0
+
+def minus(key):
+    st.session_state[key] = round(st.session_state[key] - 0.5, 2)
+
+def plus(key):
+    st.session_state[key] = round(st.session_state[key] + 0.5, 2)
 
 cols = st.columns(3)
 
 with cols[0]:
     st.markdown("**ΔT(Normal)**")
-    c1, c2, c3 = st.columns([1,1,3])
-    with c1: st.button("−", on_click=minus, args=("dt_normal",))
-    with c2: st.button("+", on_click=plus,  args=("dt_normal",))
+    c1, c2, _ = st.columns([1,1,3])
+    with c1:
+        st.button("−", key="btn_norm_minus", on_click=minus, args=("dt_normal",))
+    with c2:
+        st.button("+", key="btn_norm_plus",  on_click=plus,  args=("dt_normal",))
     st.metric("기온 보정(℃)", f"{st.session_state.dt_normal:+.2f}")
 
 with cols[1]:
     st.markdown("**ΔT(Best)**")
-    c1, c2, c3 = st.columns([1,1,3])
-    with c1: st.button("−", on_click=minus, args=("dt_best",))
-    with c2: st.button("+", on_click=plus,  args=("dt_best",))
+    c1, c2, _ = st.columns([1,1,3])
+    with c1:
+        st.button("−", key="btn_best_minus", on_click=minus, args=("dt_best",))
+    with c2:
+        st.button("+", key="btn_best_plus",  on_click=plus,  args=("dt_best",))
     st.metric("기온 보정(℃)", f"{st.session_state.dt_best:+.2f}")
 
 with cols[2]:
     st.markdown("**ΔT(Conservative)**")
-    c1, c2, c3 = st.columns([1,1,3])
-    with c1: st.button("−", on_click=minus, args=("dt_cons",))
-    with c2: st.button("+", on_click=plus,  args=("dt_cons",))
+    c1, c2, _ = st.columns([1,1,3])
+    with c1:
+        st.button("−", key="btn_cons_minus", on_click=minus, args=("dt_cons",))
+    with c2:
+        st.button("+", key="btn_cons_plus",  on_click=plus,  args=("dt_cons",))
     st.metric("기온 보정(℃)", f"{st.session_state.dt_cons:+.2f}")
 
 # ===== 판매량 분석 =====
