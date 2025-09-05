@@ -15,7 +15,7 @@ from glob import glob
 # ─────────────────────────────────────────────────────────────
 # 기본
 st.set_page_config(page_title="도시가스 공급량·판매량 분석 (Poly-3)", layout="wide")
-st.title("도시가스 공급량·판매량량 분석 (Poly-3)")
+st.title("도시가스 공급량·판매량 분석 (Poly-3)")
 st.caption("공급량: 기온↔공급량 3차 다항식 · 판매량(냉방용): (전월16~당월15) 평균기온 기반")
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
