@@ -24,13 +24,10 @@ warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 # 한글 폰트: 레포의 fonts/NanumGothic.ttf 우선 적용
 def set_korean_font():
     here = Path(__file__).parent if "__file__" in globals() else Path.cwd()
-    # 1) 레포 폰트 우선
     candidates = [
         here / "fonts" / "NanumGothic.ttf",
+        here / "fonts" / "NanumGothic-Regular.ttf",   # ← 이 줄 추가
         here / "fonts" / "NotoSansKR-Regular.otf",
-    ]
-    # 2) 시스템 기본 후보
-    candidates += [
         Path("/usr/share/fonts/truetype/nanum/NanumGothic.ttf"),
         Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
         Path("/Library/Fonts/AppleSDGothicNeo.ttc"),
@@ -50,7 +47,6 @@ def set_korean_font():
     plt.rcParams["font.family"] = ["DejaVu Sans"]
     plt.rcParams["axes.unicode_minus"] = False
     return False
-
 set_korean_font()
 
 # ─────────────────────────────────────────────────────────────
