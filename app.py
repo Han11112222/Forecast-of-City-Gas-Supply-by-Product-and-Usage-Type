@@ -258,7 +258,7 @@ if mode == "공급량 분석":
 
         st.session_state["supply_materials"] = dict(
             base_df=base, train_df=train_df, prods=prods, x_train=x_train_base,
-            fut_base=fut_base, start_ts=f_start, end_ts=f_end, temp_col=temp_col
+            fut_base=fut_base, start_ts=f_start, end_ts=f_end,
         )
         st.success("공급량 예측(베이스) 준비 완료! 아래에서 시나리오 Δ°C를 조절하세요.")
 
@@ -269,7 +269,6 @@ if mode == "공급량 분석":
     mats = st.session_state["supply_materials"]
     base, train_df, prods = mats["base_df"], mats["train_df"], mats["prods"]
     x_train, fut_base = mats["x_train"], mats["fut_base"]
-    temp_col = mats["temp_col"]
     months = list(range(1,13))
 
     st.subheader("시나리오 Δ°C (평균기온 보정)")
@@ -310,7 +309,6 @@ if mode == "공급량 분석":
         pivot_total = pd.concat([pivot, pd.DataFrame([tot])], ignore_index=True)
         return pivot_total
 
-    # 표 출력
     st.markdown("### Normal")
     tbl_n = _forecast_table_for_delta(d_norm)
     render_centered_table(tbl_n, float1_cols=["월평균기온"], int_cols=[c for c in tbl_n.columns if c not in ["연","월","월평균기온"]], index=False)
@@ -323,20 +321,8 @@ if mode == "공급량 분석":
     tbl_c = _forecast_table_for_delta(d_cons)
     render_centered_table(tbl_c, float1_cols=["월평균기온"], int_cols=[c for c in tbl_c.columns if c not in ["연","월","월평균기온"]], index=False)
 
-    # ▶ 모든 시나리오 합쳐서 한 번에 다운로드
-    def add_scenario(df, name):
-        d = df.copy()
-        d.insert(0, "시나리오", name)
-        return d
-    tbl_all = pd.concat([add_scenario(tbl_n, "Normal"),
-                         add_scenario(tbl_b, "Best"),
-                         add_scenario(tbl_c, "Conservative")], ignore_index=True)
-    st.download_button(
-        "예측 결과 CSV 다운로드 (Normal/Best/Conservative)",
-        data=tbl_all.to_csv(index=False).encode("utf-8-sig"),
-        file_name="citygas_supply_forecast_all_scenarios.csv",
-        mime="text/csv"
-    )
+    st.download_button("예측 결과 CSV 다운로드 (Normal)", data=tbl_n.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="citygas_supply_forecast_normal.csv", mime="text/csv")
 
     # 그래프( Normal Δ°C 기준 )
     st.markdown("### 그래프 (Normal 기준)")
@@ -352,17 +338,18 @@ if mode == "공급량 분석":
     x_future_norm = (fut_base["temp"] + float(d_norm)).astype(float).values
 
     for prod in prods:
-        # ① 월 시계열 + 예측
-        y_train_prod = train_df[prod].astype(float).values
-        y_future_norm, r2_train, model, poly = fit_poly3_and_predict(x_train, y_train_prod, x_future_norm)
+        y_train = train_df[prod].astype(float).values
+        y_future_norm, r2_train, model, poly = fit_poly3_and_predict(x_train, y_train, x_future_norm)
 
         P = fut_base[["연","월"]].copy()
         P["pred"] = np.clip(np.rint(y_future_norm).astype(np.int64), a_min=0, a_max=None)
 
         fig = plt.figure(figsize=(9,3.6)); ax = plt.gca()
+
         for y in sorted([int(v) for v in years_view]):
             s = (base.loc[base["연"]==y, ["월", prod]].set_index("월")[prod]).reindex(months)
             ax.plot(months, s.values, label=f"{y} 실적")
+
         pred_vals = []
         y, m = int(mats["start_ts"].year), int(mats["start_ts"].month)
         P2 = P.copy(); P2["연"]=P2["연"].astype(int); P2["월"]=P2["월"].astype(int)
@@ -372,6 +359,7 @@ if mode == "공급량 분석":
             if m==12: y+=1; m=1
             else: m+=1
         ax.plot(months, pred_vals, linestyle="--", label="예측(Normal)")
+
         ax.set_xlim(1,12); ax.set_xticks(months); ax.set_xticklabels([f"{mm}월" for mm in months])
         ax.set_xlabel("월"); ax.set_ylabel("공급량 (MJ)")
         ax.set_title(f"{prod} — Poly-3 (Train R²={r2_train:.3f})"); ax.legend(loc="best")
@@ -379,30 +367,6 @@ if mode == "공급량 분석":
                 transform=ax.transAxes, ha="left", va="top", fontsize=9,
                 color="#1f77b4", bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
         plt.tight_layout(); st.pyplot(fig, clear_figure=True)
-
-        # ② 기온-공급량 상관(Poly-3) + 95% 신뢰구간
-        figc, axc = plt.subplots(figsize=(9,4.4))
-        x_tr = train_df[temp_col].astype(float).values
-        y_tr = y_train_prod
-        axc.scatter(x_tr, y_tr, alpha=0.65, label="학습 샘플")
-
-        xx = np.linspace(np.nanmin(x_tr)-1, np.nanmax(x_tr)+1, 200)
-        yhat, _, model_s, _ = fit_poly3_and_predict(x_tr, y_tr, xx)
-        axc.plot(xx, yhat, lw=2.6, color="#1f77b4", label="Poly-3")
-
-        pred_train, _, _, _ = fit_poly3_and_predict(x_tr, y_tr, x_tr)
-        resid = y_tr - pred_train
-        s = np.nanstd(resid)
-        axc.fill_between(xx, yhat-1.96*s, yhat+1.96*s, color="#1f77b4", alpha=0.14, label="95% 신뢰구간")
-
-        axc.set_xlabel("기온 (℃)"); axc.set_ylabel("공급량 (MJ)")
-        axc.grid(alpha=0.25); axc.legend(loc="best")
-        xmin, xmax = axc.get_xlim(); ymin, ymax = axc.get_ylim()
-        axc.text(xmin + 0.02*(xmax-xmin), ymin + 0.06*(ymax-ymin),
-                 f"Poly-3: {poly_eq_text(model_s)}",
-                 fontsize=10, color="#1f77b4",
-                 bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
-        st.pyplot(figc)
 
 # =============== B) 판매량 분석(냉방용) =====================================
 else:
@@ -446,6 +410,7 @@ else:
     if sales_file is None or temp_raw_file is None:
         st.info("두 파일을 모두 준비하세요."); st.stop()
 
+    # 판매 실적 자동 매핑
     try:
         xls = pd.ExcelFile(sales_file, engine="openpyxl")
         sheet = "실적_월합" if "실적_월합" in xls.sheet_names else ("냉방용" if "냉방용" in xls.sheet_names else xls.sheet_names[0])
@@ -495,6 +460,7 @@ else:
             end_m   = st.selectbox("예측 종료(월)", list(range(1,13)), index=11)
         run_btn = st.button("예측 시작", type="primary")
 
+    # ---------- 실행(베이스 재료 저장)
     if run_btn:
         temp_raw["연"] = temp_raw["일자"].dt.year; temp_raw["월"] = temp_raw["일자"].dt.month
         monthly_cal = temp_raw.groupby(["연","월"])["기온"].mean().reset_index()
@@ -553,7 +519,7 @@ else:
     r2_fit = sm["r2_fit"]
     years_all = sm["years_all"]
 
-    # ΔT 시나리오 즉시 반영
+    # ---------- ΔT 시나리오 즉시 반영
     st.subheader("시나리오 Δ°C (평균기온 보정)")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -591,13 +557,28 @@ else:
         file_name="cooling_sales_forecast_normal.csv", mime="text/csv"
     )
 
-    # 그래프 1: 연도별 월 시계열 + 예측(Normal)
+    # ---------- 검증표 (가능한 경우)
+    actual = sales_df[["연","월","판매량"]].rename(columns={"판매량":"실제판매량"})
+    chk = sale_n[sale_n["월"].ne("종계")][["연","월","예측판매량"]].copy()
+    chk[["연","월"]] = chk[["연","월"]].astype(int)
+    valid = pd.merge(chk, actual, on=["연","월"], how="left")
+    if valid["실제판매량"].notna().any():
+        valid["오차"] = (valid["예측판매량"] - valid["실제판매량"]).astype("Int64")
+        valid["오차율(%)"] = ((valid["오차"]/valid["실제판매량"])*100).round(1).astype("Float64")
+        st.subheader("판매량 예측 검증")
+        render_centered_table(
+            valid[["연","월","실제판매량","예측판매량","오차","오차율(%)"]],
+            int_cols=["실제판매량","예측판매량","오차"], index=False
+        )
+
+    # ---------- 그래프 1: 연도별 월 시계열 + 예측(Normal)
     st.subheader("그래프 (Normal 기준)")
     years_default = years_all[-5:] if len(years_all)>=5 else years_all
     years_view = st.multiselect("표시할 실적 연도", options=years_all,
                                 default=st.session_state.get("sales_years_view", years_default),
                                 key="sales_years_view")
 
+    # 예측(Normal) 월별 생성
     base_plot = pred_base.copy()
     base_plot["기간평균기온(적용)"] = base_plot["기간평균기온"] + d_norm
     y_pred_norm, r2_line, model_line, _ = fit_poly3_and_predict(
@@ -611,6 +592,7 @@ else:
         one = sales_df[sales_df["연"]==y][["월","판매량"]].dropna()
         if not one.empty:
             ax2.plot(one["월"], one["판매량"], label=f"{y} 실적", alpha=0.95)
+    # 예측선: 첫 해 1~12월 기준으로 시퀀스 표현
     pred_vals = []
     y, m = int(sm["f_start"].year), int(sm["f_start"].month)
     P2 = base_plot[["연","월","pred"]].astype(int)
@@ -629,20 +611,21 @@ else:
              color="#1f77b4", bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
     st.pyplot(fig2)
 
-    # 그래프 2: 기온-판매량 산점 + Poly3 + 95% 신뢰구간 + 방정식
+    # ---------- 그래프 2: 기온-판매량 산점 + Poly3 + ±1.96 + 식
     st.subheader(f"기온-냉방용 실적 상관관계 (Train, R²={r2_fit:.3f})")
     fig3, ax3 = plt.subplots(figsize=(10,5.2))
     ax3.scatter(x_train, y_train, alpha=0.65, label="학습 샘플")
 
     xx = np.linspace(np.nanmin(x_train)-1, np.nanmax(x_train)+1, 200)
-    yhat, _, model_s, _ = fit_poly3_and_predict(x_train, y_train, xx)
+    yhat, _, model_s, poly_s = fit_poly3_and_predict(x_train, y_train, xx)
     ax3.plot(xx, yhat, lw=2.6, color="#1f77b4", label="Poly-3")
 
-    pred_train, _, _, _ = fit_poly3_and_predict(x_train, y_train, x_train)
-    resid = y_train - pred_train
+    # ±1.96 대략적 밴드(잔차 표준편차)
+    resid = y_train - fit_poly3_and_predict(x_train, y_train, x_train)[0]
     s = np.nanstd(resid)
-    ax3.fill_between(xx, yhat-1.96*s, yhat+1.96*s, color="#1f77b4", alpha=0.14, label="95% 신뢰구간")
+    ax3.fill_between(xx, yhat-1.96*s, yhat+1.96*s, color="#1f77b4", alpha=0.14, label="±1.96")
 
+    # 온도 구간 중앙값 보조 포인트
     bins = np.linspace(np.nanmin(x_train), np.nanmax(x_train), 15)
     gb = pd.DataFrame({"bin": pd.cut(x_train, bins), "y": y_train}).groupby("bin")["y"].median().reset_index()
     gb["x"] = [b.mid for b in gb["bin"]]
