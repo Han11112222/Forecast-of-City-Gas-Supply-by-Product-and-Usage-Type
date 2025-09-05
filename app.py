@@ -53,7 +53,7 @@ def pick_value(val):
     except Exception:
         return f"{val}"
 
-def style_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+def style_table(df: pd.DataFrame):
     sty = (df.style
            .format(pick_value, na_rep="")
            .set_properties(**{"text-align": "center"})
