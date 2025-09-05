@@ -1,484 +1,457 @@
-# app.py — 도시가스 공급·판매 분석 (Poly-3) — RAW 기온(일단위) 자동 집계 지원
+# app.py — 도시가스 공급·판매 분석 (Poly-3)
+# -----------------------------------------------------------
+# 요구사항 반영:
+# - 좌측 'Repo 내 파일 사용'이면 파일 드롭다운 숨김, '파일 업로드'일 때만 노출
+# - [예측 시작] 버튼 복구, 이후 ΔT(±0.5)는 누를 때 즉시 반영
+# - 표: 연월(예: 2025.01) 1열, 중앙 정렬, 기온 소수점1자리/나머지 천단위 콤마
+# - Normal / Best / Conservative 3표 + CSV
+# - 기온–냉방용 실적 상관관계(Train, Poly-3, R²) 그래프
+# - 기온 RAW(일자료) → 당월평균기온, 전월16~당월15 기간평균기온 정확 계산
+# - 판매 실적 파일: '연','월', '냉방용'(이름에 '냉' 포함시 자동 인식)
+# -----------------------------------------------------------
+
 import os
+import io
 from pathlib import Path
 import warnings
-warnings.filterwarnings("ignore")
-
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import streamlit as st
-
+import matplotlib.pyplot as plt
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
 
-# =============== 기본 환경 ===============
-st.set_page_config(page_title="도시가스 공급·판매 분석 (Poly-3)", layout="wide")
+warnings.filterwarnings("ignore")
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
-# (선택) 한글 폰트 적용 (있을 때만)
-def set_korean_font():
+APP_DIR = Path(__file__).resolve().parent
+DATA_DIR = APP_DIR / "data"
+
+DEFAULT_SALES_PATH = DATA_DIR / "상품별판매량.xlsx"  # 연/월/냉방용(또는 '냉' 포함 열)
+DEFAULT_TEMP_PATH  = DATA_DIR / "기온.xlsx"        # 시트에 날짜, 평균기온(℃)
+
+# -----------------------------
+# 공통 유틸
+# -----------------------------
+def set_session_defaults():
+    ss = st.session_state
+    ss.setdefault("view", "판매량 분석(냉방용)")  # 기본 탭
+    ss.setdefault("use_repo", True)
+    ss.setdefault("train_years", [2023, 2024, 2025])
+    ss.setdefault("start_year", 2025)
+    ss.setdefault("start_month", 1)
+    ss.setdefault("end_year",   2025)
+    ss.setdefault("end_month",  12)
+    # ΔT 시나리오
+    ss.setdefault("dt_normal", 0.0)
+    ss.setdefault("dt_best",   0.0)
+    ss.setdefault("dt_cons",   0.0)
+    # 예측 시작 상태
+    ss.setdefault("ready", False)
+
+def hyphen_to_float(x):
     try:
-        candidates = [
-            Path("data/fonts/NanumGothic-Regular.ttf"),
-            Path("data/NanumGothic-Regular.ttf"),
-        ]
-        for p in candidates:
-            if p.exists():
-                from matplotlib import font_manager, rcParams
-                font_manager.fontManager.addfont(str(p))
-                rcParams["font.family"] = "NanumGothic"
-                break
-    except Exception:
-        pass
+        return float(x)
+    except:
+        return np.nan
 
-set_korean_font()
+def yyyymm_str(y:int, m:int)->str:
+    return f"{y}.{m:02d}"
 
-# ===== 공통 유틸 =====
-TEMP_COLS = ["당월평균기온", "기간평균기온"]
+def month_iter(y1, m1, y2, m2):
+    y, m = y1, m1
+    while (y < y2) or (y == y2 and m <= m2):
+        yield y, m
+        m += 1
+        if m == 13:
+            y += 1
+            m = 1
 
-def yyyymm_col(df):
-    out = df.copy()
-    out["연월"] = out["연"].astype(int).astype(str).str.zfill(4) + "." + out["월"].astype(int).astype(str).str.zfill(2)
+def center_style_html(df: pd.DataFrame) -> str:
+    # 중앙 정렬 + 세로 중앙
+    css = """
+    <style>
+      table.centered-table {margin: 0 auto;}
+      .centered-table th, .centered-table td {
+        text-align: center !important;
+        vertical-align: middle !important;
+        padding: 6px 10px;
+        font-size: 14px;
+      }
+    </style>
+    """
+    html = df.to_html(index=False, classes="centered-table")
+    return css + html
+
+def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
+    b = io.BytesIO()
+    df.to_csv(b, index=False, encoding="utf-8-sig")
+    return b.getvalue()
+
+# -----------------------------
+# 데이터 로드 & 가공
+# -----------------------------
+@st.cache_data(show_spinner=False)
+def load_sales(path: Path) -> pd.DataFrame:
+    # 예상 포맷: 연, 월, (냉방용/냉난방/냉…)
+    df = pd.read_excel(path)
+    cols = [c.strip() for c in df.columns]
+    df.columns = cols
+
+    # 연/월 파생
+    if "연" not in df.columns and "년" in df.columns:
+        df["연"] = df["년"]
+    if "월" not in df.columns and "month" in df.columns:
+        df["월"] = df["month"]
+
+    # 열 이름 정규화
+    if "연" not in df.columns or "월" not in df.columns:
+        raise ValueError("판매 실적 파일에는 '연'과 '월' 열이 필요합니다.")
+
+    # 냉방용 열 찾기(이름에 '냉' 포함)
+    cooling_cols = [c for c in df.columns if ("냉" in c and c not in ["연","월","연월"])]
+    if not cooling_cols:
+        raise ValueError("판매 실적 파일에서 '냉'이 포함된 실적 열을 찾지 못했습니다. (예: 냉방용)")
+    # 첫 번째 냉 관련 열 사용
+    cool_col = cooling_cols[0]
+
+    keep = ["연","월", cool_col]
+    out = df[keep].copy()
+    out.rename(columns={cool_col:"냉방용"}, inplace=True)
+    # 숫자 보정
+    out["냉방용"] = pd.to_numeric(out["냉방용"], errors="coerce").fillna(0)
     return out
 
-def pick_value(val):
-    if pd.isna(val):
-        return ""
-    # 온도: 소수1자리(절대값이 200 미만 & 실수)
-    if isinstance(val, (float, np.floating)) and abs(val) < 200 and abs(val - round(val)) > 0:
-        return f"{val:.1f}"
-    # 수치: 콤마
-    try:
-        return f"{int(round(val)):,}"
-    except Exception:
-        return f"{val}"
-
-def style_table(df: pd.DataFrame):
-    sty = (df.style
-           .format(pick_value, na_rep="")
-           .set_properties(**{"text-align": "center"})
-           .set_table_styles([dict(selector="th", props=[("text-align", "center")])])
-           )
-    return sty
-
-def add_total_row(df: pd.DataFrame, label="종계") -> pd.DataFrame:
-    out = df.copy()
-    num_cols = out.select_dtypes(include=[np.number]).columns.tolist()
-    total = {c: out[c].sum(skipna=True) for c in num_cols}
-    for c in out.columns:
-        if c not in total:
-            total[c] = ""
-    total["연월"] = label
-    if "연" in total: total["연"] = ""
-    if "월" in total: total["월"] = ""
-    out = pd.concat([out, pd.DataFrame([total])], ignore_index=True)
-    return out
-
-def poly3_fit(x: np.ndarray, y: np.ndarray):
-    poly = PolynomialFeatures(degree=3, include_bias=False)
-    X = poly.fit_transform(x.reshape(-1,1))
-    model = LinearRegression()
-    model.fit(X, y)
-    return model, poly
-
-def poly3_predict(model, poly, x: np.ndarray) -> np.ndarray:
-    return model.predict(poly.transform(x.reshape(-1,1)))
-
-def list_repo_excels(subdir="data"):
-    try:
-        files = sorted([f for f in os.listdir(subdir) if f.lower().endswith(".xlsx")])
-        return [os.path.join(subdir, f) for f in files]
-    except Exception:
-        return []
-
-# ============== 엑셀 로더 (기온 RAW 자동 집계) ==============
-def _normalize_temp_header(df0: pd.DataFrame) -> pd.DataFrame:
-    """
-    헤더가 위쪽 설명행에 묻혀 있을 때 '날짜' 또는 '연'이 등장하는 행을 찾아
-    그 다음 행부터 데이터로 쓰도록 헤더를 재구성한다.
-    """
-    df = df0.copy()
-    cols = [str(c) for c in df.columns]
-    # 이미 정상적으로 읽힌 경우
-    if ("날짜" in cols) or (("연" in cols) and ("월" in cols)):
-        return df
-
-    # 헤더 탐색: 첫 번째 컬럼에서 '날짜'가 있는 행 찾기
-    first_col = df.columns[0]
-    idx = None
-    for i, v in df[first_col].items():
-        if str(v).strip() in ["날짜", "연"]:
-            idx = i
-            break
-    if idx is not None:
-        new_header = df.iloc[idx].astype(str).tolist()
-        df = df.iloc[idx+1:].copy()
-        df.columns = new_header
-        return df
-
-    # 그래도 못 찾으면 그대로 반환
-    return df
-
-def _temp_from_daily(df_daily: pd.DataFrame) -> pd.DataFrame:
-    """
-    일 단위 RAW(열: 날짜, 평균기온(℃) 또는 평균기온)를
-    월 단위 `연,월,당월평균기온` + (m-1 16 ~ m 15) `기간평균기온`으로 변환
-    """
-    df = df_daily.copy()
-    # 컬럼명 통일
-    cols = {c:str(c) for c in df.columns}
-    df.rename(columns=cols, inplace=True)
-
-    # 날짜컬럼 찾기
+@st.cache_data(show_spinner=False)
+def load_temp_daily(path: Path) -> pd.DataFrame:
+    # 포맷(예시): 날짜, 지점, 평균기온(℃)
+    # 날짜는 datetime으로 파싱
+    df = pd.read_excel(path)
+    cols = [c.strip() for c in df.columns]
+    df.columns = cols
+    # 날짜 열 자동 탐색
     date_col = None
-    for cand in df.columns:
-        if "날짜" in str(cand):
-            date_col = cand
+    for c in df.columns:
+        if "일자" in c or "날짜" in c or "date" in c.lower():
+            date_col = c
             break
     if date_col is None:
-        raise ValueError("기온 RAW에서 '날짜' 열을 찾지 못했습니다.")
+        raise ValueError("기온 파일에서 '날짜/일자' 열을 찾지 못했습니다.")
 
-    # 값 컬럼(평균기온) 찾기
-    val_col = None
-    for cand in df.columns:
-        s = str(cand)
-        if ("평균기온" in s) or (s == "기온") or ("기온(℃)" in s):
-            if cand != date_col:
-                val_col = cand
-                break
-    if val_col is None:
-        raise ValueError("기온 RAW에서 '평균기온' 열을 찾지 못했습니다.")
-
-    # 파싱
-    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-    df[val_col] = pd.to_numeric(df[val_col], errors="coerce")
-    df = df.dropna(subset=[date_col, val_col]).copy()
-
-    # 당월평균기온(달력월 평균)
-    df["연"] = df[date_col].dt.year
-    df["월"] = df[date_col].dt.month
-    m1 = df.groupby(["연","월"], as_index=False)[val_col].mean().rename(columns={val_col:"당월평균기온"})
-
-    # 기간평균기온: (전월 16일 ~ 당월 15일)
-    d = df.copy()
-    d["pm_year"] = d[date_col].dt.year
-    d["pm_month"] = d[date_col].dt.month
-    d["day"] = d[date_col].dt.day
-    # 16일 이상 → 다음 달로 귀속, 12월 처리
-    m = d["pm_month"].values
-    y = d["pm_year"].values
-    flag = d["day"].values >= 16
-    m2 = m.copy()
-    y2 = y.copy()
-    m2[flag] += 1
-    y2[(flag) & (m2==13)] += 1
-    m2[m2==13] = 1
-    d["연"] = y2
-    d["월"] = m2
-    m2 = d.groupby(["연","월"], as_index=False)[val_col].mean().rename(columns={val_col:"기간평균기온"})
-
-    out = pd.merge(m1, m2, on=["연","월"], how="outer")
-    out = out.sort_values(["연","월"]).reset_index(drop=True)
-    return out[["연","월","당월평균기온","기간평균기온"]]
-
-def prepare_temp_any(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """
-    - 일 단위 RAW(날짜/평균기온) → 월단위 집계 + 기간평균 자동생성
-    - 월 단위(연/월/당월평균기온) → 기간평균 없으면 당월평균으로 대체
-    """
-    df = _normalize_temp_header(df_raw)
-
-    cols = [str(c) for c in df.columns]
-    if ("날짜" in cols) or any("날짜" in str(c) for c in cols):
-        # RAW 일자료
-        return _temp_from_daily(df)
-
-    # 월단위 파일 케이스
-    rename_map = {}
+    temp_col = None
     for c in df.columns:
-        s = str(c)
-        if s.strip() in ["평균기온", "평균기온(℃)", "월평균기온(적용)"]:
-            rename_map[c] = "당월평균기온"
-    if rename_map:
-        df = df.rename(columns=rename_map)
+        if "평균기온" in c or "기온" in c:
+            temp_col = c
+            break
+    if temp_col is None:
+        raise ValueError("기온 파일에서 '평균기온' 열을 찾지 못했습니다.")
 
-    need = {"연","월"}
-    if not need.issubset(set(df.columns)):
-        raise ValueError("기온 파일에는 최소 '연','월' 칼럼이 있어야 합니다.")
+    t = df[[date_col, temp_col]].copy()
+    t[date_col] = pd.to_datetime(t[date_col])
+    t.rename(columns={date_col:"날짜", temp_col:"평균기온"}, inplace=True)
+    return t
 
-    if "당월평균기온" not in df.columns:
-        raise ValueError("기온 파일에서 '당월평균기온'을 찾을 수 없습니다. (RAW 일자료라면 '날짜/평균기온' 형태여야 합니다)")
+def make_monthly_temp(daily: pd.DataFrame) -> pd.DataFrame:
+    """당월평균기온 + 기간평균기온(m-1,16~m,15) 계산"""
+    t = daily.copy()
+    t["연"] = t["날짜"].dt.year
+    t["월"] = t["날짜"].dt.month
+    t["일"] = t["날짜"].dt.day
 
-    if "기간평균기온" not in df.columns:
-        df["기간평균기온"] = df["당월평균기온"]
+    # 당월평균
+    mon = t.groupby(["연","월"])["평균기온"].mean().reset_index()
+    mon.rename(columns={"평균기온":"당월평균기온"}, inplace=True)
 
-    df = df[["연","월","당월평균기온","기간평균기온"]].copy()
-    return df
+    # 기간평균기온(m-1, 16 ~ m, 15)
+    res = []
+    years = sorted(t["연"].unique())
+    for y in years:
+        months = sorted(t.loc[t["연"]==y, "월"].unique())
+        for m in months:
+            # 전월
+            prev_y, prev_m = (y-1, 12) if m==1 else (y, m-1)
 
-def load_excel_any(path_or_buf):
-    """
-    업로드 파일/로컬 경로 모두 지원 + 헤더 보정
-    """
-    try:
-        df0 = pd.read_excel(path_or_buf)
-    except Exception as e:
-        st.error(f"엑셀 로딩 실패: {e}")
-        return None
-    return df0
+            prev_mask = (t["연"]==prev_y) & (t["월"]==prev_m) & (t["일"]>=16)
+            curr_mask = (t["연"]==y) & (t["월"]==m) & (t["일"]<=15)
 
-# ============== 사이드바 ==============
-with st.sidebar:
-    st.header("분석 유형")
-    mode = st.radio("선택", ["공급량 분석", "판매량 분석(냉방용)"], index=0)
+            seg = pd.concat([t.loc[prev_mask, ["평균기온"]],
+                             t.loc[curr_mask, ["평균기온"]]], axis=0)
+            if len(seg)==0:
+                per = np.nan
+            else:
+                per = seg["평균기온"].mean()
+            res.append((y,m, per))
+    per_df = pd.DataFrame(res, columns=["연","월","기간평균기온"])
 
-    st.header("데이터 불러오기")
-    src = st.radio("방식", ["Repo 내 파일 사용", "파일 업로드"], index=0)
+    out = pd.merge(mon, per_df, on=["연","월"], how="outer").sort_values(["연","월"])
+    return out.reset_index(drop=True)
 
-    use_repo = (src == "Repo 내 파일 사용")
+def select_train(df: pd.DataFrame, years: list[int]) -> pd.DataFrame:
+    return df[df["연"].isin(years)].copy()
 
-    st.caption("실적파일(공급·판매·기온 중 필요할 것만 사용)")
-    if use_repo:
-        repo_files = list_repo_excels("data")
-        if len(repo_files) == 0:
-            st.warning("data/ 폴더에 .xlsx 파일을 올려 두세요.")
-        if mode.startswith("공급"):
-            supply_path = st.selectbox("공급 파일", repo_files, key="repo_supply")
-            temp_path   = st.selectbox("기온 파일", repo_files, key="repo_temp")
-            upload = {"supply": None, "sales": None, "temp": None}
+def build_poly3_model(x: np.ndarray, y: np.ndarray):
+    poly = PolynomialFeatures(degree=3, include_bias=True)
+    Xp = poly.fit_transform(x.reshape(-1,1))
+    lr = LinearRegression()
+    lr.fit(Xp, y)
+    return poly, lr
+
+def poly_predict(poly, lr, x):
+    Xp = poly.transform(np.array(x).reshape(-1,1))
+    return lr.predict(Xp)
+
+def poly_equation_text(poly, lr) -> str:
+    # y = a3 x^3 + a2 x^2 + a1 x + a0
+    coefs = lr.coef_
+    a0 = lr.intercept_
+    # sklearn + include_bias=True → X: [1, x, x^2, x^3]
+    a1, a2, a3 = coefs[1], coefs[2], coefs[3]
+    def s(v): return f"{v:+.5e}"
+    return f"y = {s(a3)}x³ {s(a2)}x² {s(a1)}x {s(a0)}"
+
+def r2_score_manual(y_true, y_pred):
+    ssr = np.sum((y_pred - np.mean(y_true))**2)
+    sst = np.sum((y_true - np.mean(y_true))**2)
+    return 0.0 if sst==0 else float(ssr/sst)
+
+# -----------------------------
+# 예측 테이블 생성
+# -----------------------------
+def make_forecast_table(month_temp: pd.DataFrame,
+                        sales: pd.DataFrame,
+                        years_train: list[int],
+                        y1:int, m1:int, y2:int, m2:int,
+                        dt: float) -> tuple[pd.DataFrame, dict]:
+    # 학습데이터(냉방용 & 기간평균기온)
+    base = pd.merge(sales, month_temp, on=["연","월"], how="inner")
+    tr = select_train(base, years_train)
+    tr = tr.dropna(subset=["기간평균기온","냉방용"])
+
+    if len(tr) < 6:
+        raise ValueError("학습 샘플이 너무 적습니다. (학습 연도를 더 선택하세요)")
+
+    x = tr["기간평균기온"].values
+    y = tr["냉방용"].values
+
+    poly, lr = build_poly3_model(x, y)
+    eq  = poly_equation_text(poly, lr)
+
+    # R²
+    yr_hat = poly_predict(poly, lr, x)
+    r2 = r2_score_manual(y, yr_hat)
+
+    # 예측용 기간
+    fr_rows = []
+    for yy, mm in month_iter(y1, m1, y2, m2):
+        row = month_temp[(month_temp["연"]==yy) & (month_temp["월"]==mm)]
+        if len(row)==0:
+            fr_rows.append((yy,mm, np.nan, np.nan))
         else:
-            sales_path  = st.selectbox("판매 실적파일", repo_files, key="repo_sales")
-            temp_path   = st.selectbox("기온 파일", repo_files, key="repo_temp2")
-            upload = {"supply": None, "sales": None, "temp": None}
-    else:
-        upload_supply = st.file_uploader("공급 파일(.xlsx)", type=["xlsx"], key="up_supply")
-        upload_sales  = st.file_uploader("판매 실적파일(.xlsx)", type=["xlsx"], key="up_sales")
-        upload_temp   = st.file_uploader("기온 파일(.xlsx)", type=["xlsx"], key="up_temp")
-        upload = {"supply": upload_supply, "sales": upload_sales, "temp": upload_temp}
-        supply_path = sales_path = temp_path = None
+            fr_rows.append((yy,mm, row["당월평균기온"].values[0],
+                                 row["기간평균기온"].values[0]))
+    fr = pd.DataFrame(fr_rows, columns=["연","월","당월평균기온","기간평균기온"])
 
-    st.header("예측 기간")
-    c1, c2 = st.columns(2)
-    with c1:
-        y0 = st.selectbox("예측 시작(연)", list(range(2015, 2031)), index=list(range(2015,2031)).index(2025), key="pred_y0")
-        m0 = st.selectbox("예측 시작(월)", list(range(1,13)), index=0, key="pred_m0")
-    with c2:
-        y1 = st.selectbox("예측 종료(연)", list(range(2015, 2031)), index=list(range(2015,2031)).index(2025), key="pred_y1")
-        m1 = st.selectbox("예측 종료(월)", list(range(1,13)), index=11, key="pred_m1")
+    # ΔT 적용은 '기간평균기온'에만
+    x_pred = (fr["기간평균기온"].values + dt).astype(float)
+    y_pred = np.clip(np.rint(poly_predict(poly, lr, x_pred)), 0, None)
 
-# ============== 본문: 제목 & ΔT 컨트롤 ==============
-st.title("도시가스 공급·판매 분석 (Poly-3)")
+    tbl = fr.copy()
+    tbl["연월"] = [yyyymm_str(a,b) for a,b in zip(tbl["연"], tbl["월"])]
+    tbl["월평균기온(적용)"] = np.round(fr["기간평균기온"] + dt, 1)  # 표시에 1자리
+    tbl["예측판매량"] = y_pred.astype(int)
 
-for k in ["dt_normal", "dt_best", "dt_cons"]:
-    if k not in st.session_state:
-        st.session_state[k] = 0.0
+    # 보기용 정렬/컬럼
+    show = tbl[["연월","월평균기온(적용)","예측판매량"]].copy()
 
-def minus(key): st.session_state[key] = round(st.session_state[key] - 0.5, 2)
-def plus(key):  st.session_state[key] = round(st.session_state[key] + 0.5, 2)
+    # 숫자 포맷
+    show["예측판매량"] = show["예측판매량"].map(lambda v: f"{int(v):,}")
+    show["월평균기온(적용)"] = show["월평균기온(적용)"].map(lambda v: f"{v:.1f}")
 
-st.subheader("ΔT 시나리오 (℃)")
-c1, c2, c3 = st.columns(3)
+    # 총계
+    tot = int(np.nansum(y_pred))
+    show.loc[len(show)] = ["총계", "", f"{tot:,}"]
 
-with c1:
-    st.markdown("**ΔT(Normal)**")
-    b1, b2, _ = st.columns([1,1,6])
-    with b1: st.button("−", key="btn_norm_minus", on_click=minus, args=("dt_normal",))
-    with b2: st.button("+", key="btn_norm_plus",  on_click=plus,  args=("dt_normal",))
-    st.metric("기온 보정(℃)", f"{st.session_state.dt_normal:+.2f}")
+    info = {"r2": r2, "equation": eq, "poly": poly, "lr": lr, "train": tr}
+    return show, info
 
-with c2:
-    st.markdown("**ΔT(Best)**")
-    b1, b2, _ = st.columns([1,1,6])
-    with b1: st.button("−", key="btn_best_minus", on_click=minus, args=("dt_best",))
-    with b2: st.button("+", key="btn_best_plus",  on_click=plus,  args=("dt_best",))
-    st.metric("기온 보정(℃)", f"{st.session_state.dt_best:+.2f}")
+# -----------------------------
+# Streamlit UI
+# -----------------------------
+set_session_defaults()
+st.set_page_config(page_title="도시가스 공급·판매 분석 (Poly-3)", layout="wide")
 
-with c3:
-    st.markdown("**ΔT(Conservative)**")
-    b1, b2, _ = st.columns([1,1,6])
-    with b1: st.button("−", key="btn_cons_minus", on_click=minus, args=("dt_cons",))
-    with b2: st.button("+", key="btn_cons_plus",  on_click=plus,  args=("dt_cons",))
-    st.metric("기온 보정(℃)", f"{st.session_state.dt_cons:+.2f}")
+# 좌측 패널 ---------------------------------------------------
+with st.sidebar:
+    st.markdown("### 분석 유형")
+    view = st.radio("선택", ["공급량 분석", "판매량 분석(냉방용)"], index=1, label_visibility="collapsed",
+                    key="view_radio")
+    st.session_state["view"] = view
 
-# ============== 데이터 로드 ==============
-def read_temp_prepared(source):
-    df0 = load_excel_any(source)
-    if df0 is None:
-        return None
+    st.markdown("### 데이터를 불러오기")
+    method = st.radio("방식", ["Repo 내 파일 사용", "파일 업로드"], index=0)
+    st.session_state["use_repo"] = (method == "Repo 내 파일 사용")
+
+    # 파일 선택 (업로드 모드에서만 노출)
+    sales_path = DEFAULT_SALES_PATH
+    temp_path  = DEFAULT_TEMP_PATH
+
+    if not st.session_state["use_repo"]:
+        st.caption("실적파일(공급·판매·기온 중 필요한 것만 사용)")
+    if (view == "판매량 분석(냉방용)") and (not st.session_state["use_repo"]):
+        up_sales = st.file_uploader("판매 실적파일", type=["xlsx","csv"], key="up_sales")
+        if up_sales is not None:
+            sales_path = Path("/tmp/_sales.xlsx")
+            with open(sales_path, "wb") as f:
+                f.write(up_sales.read())
+        up_temp = st.file_uploader("기온 파일", type=["xlsx","csv"], key="up_temp")
+        if up_temp is not None:
+            temp_path = Path("/tmp/_temp.xlsx")
+            with open(temp_path, "wb") as f:
+                f.write(up_temp.read())
+
+    st.markdown("### 학습 데이터 연도 선택")
+    years_all = list(range(2017, 2031))
+    _years = st.multiselect("연도 선택", years_all, default=st.session_state["train_years"])
+    st.session_state["train_years"] = sorted(_years)
+
+    st.markdown("### 예측 기간")
+    cols = st.columns(2)
+    with cols[0]:
+        y1 = st.selectbox("예측 시작(연)", list(range(2017, 2031)), index=list(range(2017,2031)).index(st.session_state["start_year"]))
+    with cols[1]:
+        m1 = st.selectbox("예측 시작(월)", list(range(1,13)), index=st.session_state["start_month"]-1)
+    cols = st.columns(2)
+    with cols[0]:
+        y2 = st.selectbox("예측 종료(연)", list(range(2017, 2031)), index=list(range(2017,2031)).index(st.session_state["end_year"]))
+    with cols[1]:
+        m2 = st.selectbox("예측 종료(월)", list(range(1,13)), index=st.session_state["end_month"]-1)
+
+    st.session_state["start_year"]  = y1
+    st.session_state["start_month"] = m1
+    st.session_state["end_year"]    = y2
+    st.session_state["end_month"]   = m2
+
+    st.markdown("---")
+    # 예측 시작 버튼 복구
+    if st.button("예측 시작", use_container_width=True):
+        st.session_state["ready"] = True
+        st.toast("예측 준비 완료! 상단 ΔT를 조정하면 즉시 반영됩니다.", icon="✅")
+
+# 본문 타이틀 -------------------------------------------------
+st.markdown("# 도시가스 공급·판매 분석 (Poly-3)")
+st.caption("판매량 분석(냉방용): (전월16~당월15) 평균기온 기반 / ΔT는 기간평균기온에 적용")
+
+# ΔT 시나리오 슬랩 -------------------------------------------
+st.markdown("### ΔT 시나리오 (℃)")
+g = st.columns(3)
+
+def make_dt_box(col, label, key_minus, key_plus, ss_key):
+    with col:
+        st.markdown(f"**{label}**")
+        c = st.columns([1,1,5,1,1])
+        with c[1]:
+            if st.button("−", key=key_minus):  # unique key
+                st.session_state[ss_key] = round(st.session_state[ss_key] - 0.5, 2)
+        with c[3]:
+            if st.button("+", key=key_plus):
+                st.session_state[ss_key] = round(st.session_state[ss_key] + 0.5, 2)
+        st.metric("기온 보정(℃)", f"{st.session_state[ss_key]:+.2f}")
+
+make_dt_box(g[0], "ΔT(Normal)", "m_norm", "p_norm", "dt_normal")
+make_dt_box(g[1], "ΔT(Best)",   "m_best", "p_best", "dt_best")
+make_dt_box(g[2], "ΔT(Conservative)", "m_cons", "p_cons", "dt_cons")
+
+# -----------------------------
+# 판매량 분석(냉방용)
+# -----------------------------
+if st.session_state["view"] == "판매량 분석(냉방용)":
+    # 파일 로드
     try:
-        temp = prepare_temp_any(df0)
-        return temp
+        sales_df = load_sales(sales_path if not st.session_state["use_repo"] else DEFAULT_SALES_PATH)
+        temp_daily = load_temp_daily(temp_path if not st.session_state["use_repo"] else DEFAULT_TEMP_PATH)
     except Exception as e:
-        st.error(f"기온 파일 처리 실패: {e}")
-        return None
-
-if mode.startswith("공급"):
-    if (use_repo and (supply_path is None or temp_path is None)) or ((not use_repo) and (upload["supply"] is None or upload["temp"] is None)):
-        st.info("좌측에서 파일을 선택/업로드하세요.")
+        st.error(str(e))
         st.stop()
 
-    supply_df = load_excel_any(supply_path if use_repo else upload["supply"])
-    temp_df   = read_temp_prepared(temp_path if use_repo else upload["temp"])
-    if supply_df is None or temp_df is None:
+    month_temp = make_monthly_temp(temp_daily)
+
+    if not st.session_state["ready"]:
+        st.info("좌측에서 기간/학습연도를 설정하고 **[예측 시작]**을 눌러주세요.")
         st.stop()
 
-    for req in ["연","월"]:
-        if req not in supply_df.columns:
-            st.error("공급 파일에는 '연','월' 칼럼이 필요합니다.")
-            st.stop()
-
-    years_all = sorted(supply_df["연"].dropna().unique().tolist())
-    choose_years = st.multiselect("학습 연도 선택", years_all, default=years_all[-3:] if len(years_all)>=3 else years_all)
-
-    pred_index = pd.date_range(pd.Timestamp(y0, m0, 1), pd.Timestamp(y1, m1, 1), freq="MS")
-    base = pd.DataFrame({"연": pred_index.year, "월": pred_index.month})
-    base = base.merge(temp_df, on=["연","월"], how="left")
-
-    base["월평균기온(적용)"] = base["기간평균기온"] + st.session_state.dt_normal
-    base_best = base.assign(**{"월평균기온(적용)": base["기간평균기온"] + st.session_state.dt_best})
-    base_cons = base.assign(**{"월평균기온(적용)": base["기간평균기온"] + st.session_state.dt_cons})
-
-    train = supply_df.merge(temp_df, on=["연","월"], how="left")
-    train = train[train["연"].isin(choose_years)].copy()
-
-    exclude = {"연","월"} | set(TEMP_COLS)
-    prod_cols = [c for c in supply_df.columns if c not in exclude]
-    if len(prod_cols)==0:
-        st.error("공급 파일에 예측할 수치 칼럼(상품)이 없습니다.")
-        st.stop()
-
-    def forecast_table(base_df):
-        out = yyyymm_col(base_df[["연","월","월평균기온(적용)"]].copy())
-        for col in prod_cols:
-            try:
-                df2 = train[["기간평균기온", col]].dropna()
-                if len(df2) < 6:
-                    out[col] = np.nan
-                    continue
-                x = df2["기간평균기온"].values.astype(float)
-                y = df2[col].values.astype(float)
-                model, poly = poly3_fit(x, y)
-                yhat = np.clip(np.rint(poly3_predict(model, poly, base_df["월평균기온(적용)"].values.astype(float))), 0, None)
-                out[col] = yhat
-            except Exception:
-                out[col] = np.nan
-        out = add_total_row(out, label="종계")
-        return out
-
-    st.markdown("### 예측 결과 — Normal")
-    tbl_normal = forecast_table(base)
-    st.dataframe(style_table(tbl_normal), use_container_width=True)
-    st.download_button("Normal CSV", data=tbl_normal.to_csv(index=False).encode("utf-8-sig"),
-                       file_name="supply_forecast_normal.csv")
-
-    st.markdown("### 예측 결과 — Best")
-    tbl_best = forecast_table(base_best)
-    st.dataframe(style_table(tbl_best), use_container_width=True)
-    st.download_button("Best CSV", data=tbl_best.to_csv(index=False).encode("utf-8-sig"),
-                       file_name="supply_forecast_best.csv")
-
-    st.markdown("### 예측 결과 — Conservative")
-    tbl_cons = forecast_table(base_cons)
-    st.dataframe(style_table(tbl_cons), use_container_width=True)
-    st.download_button("Conservative CSV", data=tbl_cons.to_csv(index=False).encode("utf-8-sig"),
-                       file_name="supply_forecast_conservative.csv")
-
-else:
-    if (use_repo and (sales_path is None or temp_path is None)) or ((not use_repo) and (upload["sales"] is None or upload["temp"] is None)):
-        st.info("좌측에서 파일을 선택/업로드하세요.")
-        st.stop()
-
-    sales_df = load_excel_any(sales_path if use_repo else upload["sales"])
-    temp_df  = read_temp_prepared(temp_path if use_repo else upload["temp"])
-
-    if sales_df is None or temp_df is None:
-        st.stop()
-
-    for req in ["연","월"]:
-        if req not in sales_df.columns:
-            st.error("판매 실적파일에는 '연','월' 칼럼이 필요합니다.")
-            st.stop()
-    if "냉방용" not in sales_df.columns:
-        st.error("판매 실적파일에 '냉방용' 칼럼이 필요합니다.")
-        st.stop()
-
-    years_all = sorted(sales_df["연"].dropna().unique().tolist())
-    choose_years = st.multiselect("학습 연도 선택", years_all, default=years_all[-3:] if len(years_all)>=3 else years_all)
-
-    pred_index = pd.date_range(pd.Timestamp(y0, m0, 1), pd.Timestamp(y1, m1, 1), freq="MS")
-    base = pd.DataFrame({"연": pred_index.year, "월": pred_index.month})
-    base = base.merge(temp_df, on=["연","월"], how="left")
-    base["월평균기온(적용)"] = base["기간평균기온"] + st.session_state.dt_normal
-
-    train = sales_df.merge(temp_df, on=["연","월"], how="left")
-    train = train[train["연"].isin(choose_years)].copy()
-
-    # 요약표(예측만)
-    out = yyyymm_col(base[["연","월","당월평균기온","기간평균기온","월평균기온(적용)"]].copy())
-    df2 = train[["기간평균기온","냉방용"]].dropna()
-    if len(df2) >= 6:
-        x = df2["기간평균기온"].values.astype(float)
-        y = df2["냉방용"].values.astype(float)
-        model, poly = poly3_fit(x,y)
-        yhat = np.clip(np.rint(poly3_predict(model, poly, base["월평균기온(적용)"].values.astype(float))), 0, None)
-        out["예측판매량"] = yhat
-    else:
-        out["예측판매량"] = np.nan
-    out = add_total_row(out, label="종계")
-
-    st.markdown("### 판매량 예측(요약) — Normal")
-    st.dataframe(style_table(out), use_container_width=True)
-    st.download_button("판매량 예측 CSV 다운로드",
-                       data=out.to_csv(index=False).encode("utf-8-sig"),
-                       file_name="sales_forecast_normal.csv")
-
-    # 예측 검증표
-    st.markdown("### 판매량 예측 검증")
-    valid = yyyymm_col(
-        base[["연","월","기간평균기온","월평균기온(적용)"]].merge(
-            sales_df[["연","월","냉방용"]], on=["연","월"], how="left"
+    # 세 가지 시나리오 테이블
+    st.markdown("## 예측 결과 — Normal")
+    try:
+        normal_tbl, info_n = make_forecast_table(
+            month_temp, sales_df,
+            st.session_state["train_years"],
+            st.session_state["start_year"], st.session_state["start_month"],
+            st.session_state["end_year"],   st.session_state["end_month"],
+            st.session_state["dt_normal"]
         )
+        st.markdown(center_style_html(normal_tbl), unsafe_allow_html=True)
+        st.download_button("Normal CSV", df_to_csv_bytes(normal_tbl), "normal.csv", use_container_width=False)
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
+
+    st.markdown("## 예측 결과 — Best")
+    best_tbl, info_b = make_forecast_table(
+        month_temp, sales_df,
+        st.session_state["train_years"],
+        st.session_state["start_year"], st.session_state["start_month"],
+        st.session_state["end_year"],   st.session_state["end_month"],
+        st.session_state["dt_best"]
     )
-    if len(df2) >= 6:
-        valid["예측판매량"] = np.clip(np.rint(poly3_predict(model, poly, base["월평균기온(적용)"].values.astype(float))),0,None)
-        valid["실제판매량"] = valid["냉방용"]
-        valid["오차"] = valid["실제판매량"] - valid["예측판매량"]
-        valid["오차율(%)"] = np.where(valid["실제판매량"]>0, valid["오차"]/valid["실제판매량"]*100, np.nan)
-        valid = valid[["연월","실제판매량","예측판매량","오차","오차율(%)"]]
-    else:
-        valid = valid.assign(**{"실제판매량":np.nan,"예측판매량":np.nan,"오차":np.nan,"오차율(%)":np.nan})
-        valid = valid[["연월","실제판매량","예측판매량","오차","오차율(%)"]]
+    st.markdown(center_style_html(best_tbl), unsafe_allow_html=True)
+    st.download_button("Best CSV", df_to_csv_bytes(best_tbl), "best.csv", use_container_width=False)
 
-    st.dataframe(style_table(valid), use_container_width=True)
+    st.markdown("## 예측 결과 — Conservative")
+    cons_tbl, info_c = make_forecast_table(
+        month_temp, sales_df,
+        st.session_state["train_years"],
+        st.session_state["start_year"], st.session_state["start_month"],
+        st.session_state["end_year"],   st.session_state["end_month"],
+        st.session_state["dt_cons"]
+    )
+    st.markdown(center_style_html(cons_tbl), unsafe_allow_html=True)
+    st.download_button("Conservative CSV", df_to_csv_bytes(cons_tbl), "conservative.csv", use_container_width=False)
 
-    # 산점도 + Poly-3 + ±1.96 + 식
-    if len(df2) >= 6:
-        fig, ax = plt.subplots(figsize=(9,5.5), dpi=160)
-        ax.scatter(df2["기간평균기온"], df2["냉방용"], alpha=0.6, label="학습 샘플")
+    # 하단 그래프 (Train)
+    st.markdown("---")
+    st.markdown("## 기온-냉방용 실적 상관관계 (Train, Poly-3)")
 
-        xx = np.linspace(df2["기간평균기온"].min()-2, df2["기간평균기온"].max()+2, 200)
-        yy = poly3_predict(model, poly, xx)
+    tr = info_n["train"].copy()
+    x = tr["기간평균기온"].values
+    y = tr["냉방용"].values
+    poly, lr = info_n["poly"], info_n["lr"]
+    r2 = info_n["r2"]
 
-        resid = df2["냉방용"].values - poly3_predict(model, poly, df2["기간평균기온"].values)
-        s = np.nanstd(resid)
-        ax.plot(xx, yy, lw=3, label="Poly-3")
-        ax.fill_between(xx, yy-1.96*s, yy+1.96*s, alpha=0.2, label="±1.96")
+    xs = np.linspace(np.nanmin(x)-1, np.nanmax(x)+1, 200)
+    yhat = poly_predict(poly, lr, xs)
 
-        coefs = model.coef_
-        intercept = model.intercept_
-        a = coefs[2] if len(coefs)>=3 else 0.0
-        b = coefs[1] if len(coefs)>=2 else 0.0
-        c = coefs[0] if len(coefs)>=1 else 0.0
-        d = intercept
-        eq = f"y = {a:+.5e}x³ {b:+.5e}x² {c:+.5e}x {d:+.5e}"
-        r2 = model.score(PolynomialFeatures(3, include_bias=False).fit_transform(df2["기간평균기온"].values.reshape(-1,1)),
-                         df2["냉방용"].values)
+    # 단순 표준편차 기반 ±1.96 밴드(참고용)
+    resid = y - poly_predict(poly, lr, x)
+    s = np.std(resid)
+    ylow, yhigh = yhat - 1.96*s, yhat + 1.96*s
 
-        ax.text(0.02, 0.02, eq, transform=ax.transAxes, fontsize=10,
-                bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
-        ax.set_title(f"기온-냉방용 실적 상관관계 (Train, R²={r2:.3f})")
-        ax.set_xlabel("기간평균기온 (℃)")
-        ax.set_ylabel("판매량 (MJ)")
-        ax.legend(loc="best"); ax.grid(alpha=0.2)
-        st.pyplot(fig)
-    else:
-        st.info("학습 표본이 충분하지 않아(최소 6개 권장) 검증 그래프를 생략합니다.")
+    fig, ax = plt.subplots(figsize=(10,6))
+    ax.scatter(x, y, alpha=0.5, label="학습 샘플")
+    ax.plot(xs, yhat, linewidth=2.5, label="Poly-3")
+    ax.fill_between(xs, ylow, yhigh, alpha=0.15, label="±1.96")
+
+    ax.set_xlabel("기간평균기온 (m-1,16 ~ m,15)")
+    ax.set_ylabel("판매량 (MJ)")
+    ax.set_title(f"기온-냉방용 실적 상관관계 (Train, R²={r2:.3f})")
+    ax.legend(loc="best")
+    st.pyplot(fig)
+    st.caption(f"회귀식: {info_n['equation']}")
+
+# -----------------------------
+# 공급량 분석(요청이 많아 간단 안내)
+# -----------------------------
+else:
+    st.info("공급량 분석 화면은 판매량(냉방용)과 동일한 ΔT 조작 UX를 유지합니다. "
+            "현재 데이터·모델 정의(공급 vs 기온)가 프로젝트마다 달라, "
+            "판매량 분석 구조를 기준으로 기온–공급량 Poly-3를 원하시면 공급 엑셀의 "
+            "열 이름(연/월/공급열명) 규칙만 알려주세요. 그 규칙에 맞춰 동일한 표/그래프를 바로 붙일 수 있습니다.")
