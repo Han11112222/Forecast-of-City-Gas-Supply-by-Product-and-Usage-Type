@@ -21,18 +21,28 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 # ─────────────────────────────────────────────────────────────
-# 한글 폰트: 레포의 fonts/NanumGothic.ttf 우선 적용
+# 한글 폰트: 레포의 fonts/ 또는 data/fonts/에서 우선 적용
 def set_korean_font():
     here = Path(__file__).parent if "__file__" in globals() else Path.cwd()
-    candidates = [
-        here / "fonts" / "NanumGothic.ttf",
-        here / "fonts" / "NanumGothic-Regular.ttf",   # ← 이 줄 추가
-        here / "fonts" / "NotoSansKR-Regular.otf",
+    # 두 경로 모두 탐색
+    font_dirs = [here / "fonts", here / "data" / "fonts"]
+
+    candidates = []
+    for d in font_dirs:
+        candidates += [
+            d / "NanumGothic.ttf",
+            d / "NanumGothic-Regular.ttf",  # 업로드된 파일명
+            d / "NotoSansKR-Regular.otf",
+        ]
+
+    # 시스템 경로 백업
+    candidates += [
         Path("/usr/share/fonts/truetype/nanum/NanumGothic.ttf"),
         Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
         Path("/Library/Fonts/AppleSDGothicNeo.ttc"),
         Path("C:/Windows/Fonts/malgun.ttf"),
     ]
+
     for p in candidates:
         try:
             if p.exists():
@@ -44,9 +54,12 @@ def set_korean_font():
                 return True
         except Exception:
             pass
+
+    # 최후 기본값
     plt.rcParams["font.family"] = ["DejaVu Sans"]
     plt.rcParams["axes.unicode_minus"] = False
     return False
+
 set_korean_font()
 
 # ─────────────────────────────────────────────────────────────
@@ -75,7 +88,10 @@ def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
         df["월"] = df["날짜"].dt.month
     for c in df.columns:
         if df[c].dtype == "object":
-            df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False), errors="ignore")
+            df[c] = pd.to_numeric(
+                df[c].astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False),
+                errors="ignore"
+            )
     return df
 
 def detect_temp_col(df: pd.DataFrame) -> str | None:
@@ -121,8 +137,10 @@ def read_temperature_raw(file):
             if ("평균기온" in str(c)) or ("기온" in str(c)) or (str(c).lower() in ["temp","temperature"]):
                 temp_col = c; break
         if date_col is None or temp_col is None: return None
-        out = pd.DataFrame({"일자": pd.to_datetime(df[date_col], errors="coerce"),
-                            "기온": pd.to_numeric(df[temp_col], errors="coerce")}).dropna()
+        out = pd.DataFrame({
+            "일자": pd.to_datetime(df[date_col], errors="coerce"),
+            "기온": pd.to_numeric(df[temp_col], errors="coerce")
+        }).dropna()
         return out.sort_values("일자").reset_index(drop=True)
 
     name = getattr(file, "name", str(file))
@@ -262,12 +280,7 @@ if mode == "공급량 분석":
         x_future = fut["temp"].astype(float).values
         if np.isnan(x_future).any(): st.error("예측 기온 시나리오에 결측이 있습니다."); st.stop()
 
-        result = {
-            "forecast_start": f_start,
-            "years_all": sorted([int(y) for y in base["연"].dropna().unique()]),
-            "pred_table": None,
-            "per_product": {}
-        }
+        result = {"forecast_start": f_start, "years_all": sorted([int(y) for y in base["연"].dropna().unique()]), "pred_table": None, "per_product": {}}
 
         pred_rows = []
         for col in prods:
@@ -289,9 +302,6 @@ if mode == "공급량 분석":
             result["pred_table"] = pivot
 
         st.session_state["supply_result"] = result
-        if "supply_years_view" not in st.session_state:
-            default_years = result["years_all"][-5:] if len(result["years_all"])>=5 else result["years_all"]
-            st.session_state["supply_years_view"] = default_years
         st.success("공급량 예측을 완료했습니다.")
 
     # 표시
@@ -301,18 +311,21 @@ if mode == "공급량 분석":
 
     res = st.session_state["supply_result"]
     st.caption("그래프 아래 ‘표시할 실적 연도’는 즉시 반영됩니다. 좌측 설정은 ‘예측 시작’ 버튼을 눌러야 반영됩니다.")
-    years_view = st.multiselect("표시할 실적 연도", options=res["years_all"],
-                                default=st.session_state.get("supply_years_view", res["years_all"][-5:]),
-                                key="supply_years_view")
+
+    # 기본값은 세션에만 세팅(경고 방지)
+    if "supply_years_view" not in st.session_state:
+        st.session_state["supply_years_view"] = res["years_all"][-5:] if len(res["years_all"])>=5 else res["years_all"]
+
+    years_view = st.multiselect("표시할 실적 연도", options=res["years_all"], key="supply_years_view")
 
     months = list(range(1,13))
     for prod, pkg in res["per_product"].items():
         fig = plt.figure(figsize=(9,3.6)); ax = plt.gca()
-        # 실적
+        # 실적(선택 연도)
         for y in sorted([int(v) for v in years_view]):
             s = (pkg["hist"][pkg["hist"]["연"]==y].set_index("월")["val"]).reindex(months)
             ax.plot(months, s.values, label=f"{y} 실적")
-        # 예측(12개월)
+        # 예측(최근 12개월 경로)
         pred_vals = []
         y, m = int(res["forecast_start"].year), int(res["forecast_start"].month)
         P = pkg["pred"].copy(); P["연"]=P["연"].astype(int); P["월"]=P["월"].astype(int)
@@ -327,10 +340,11 @@ if mode == "공급량 분석":
         ax.set_title(f"{prod} — Poly-3 (Train R²={pkg['r2']:.3f})"); ax.legend(loc="best")
         plt.tight_layout(); st.pyplot(fig, clear_figure=True)
 
-    st.subheader("예측 결과 미리보기")
-    render_centered_table(res["pred_table"].head(24), int_cols=[c for c in res["pred_table"].columns if c not in ["연","월"]])
-    st.download_button("예측 결과 CSV 다운로드", data=res["pred_table"].to_csv(index=False).encode("utf-8-sig"),
-                       file_name="citygas_supply_forecast.csv", mime="text/csv")
+    if res["pred_table"] is not None:
+        st.subheader("예측 결과 미리보기")
+        render_centered_table(res["pred_table"].head(24), int_cols=[c for c in res["pred_table"].columns if c not in ["연","월"]])
+        st.download_button("예측 결과 CSV 다운로드", data=res["pred_table"].to_csv(index=False).encode("utf-8-sig"),
+                           file_name="citygas_supply_forecast.csv", mime="text/csv")
 
 # =============== B) 판매량 분석(냉방용) =====================================
 else:
@@ -483,9 +497,6 @@ else:
             "pred": out,
             "r2": r2_fit
         }
-        if "sales_years_view" not in st.session_state:
-            default_years = years_all[-5:] if len(years_all)>=5 else years_all
-            st.session_state["sales_years_view"] = default_years
         st.success("냉방용 판매량 예측을 완료했습니다.")
 
     if "sales_result" not in st.session_state:
@@ -494,9 +505,11 @@ else:
 
     res = st.session_state["sales_result"]
     st.caption("그래프 아래 ‘표시할 실적 연도’는 즉시 반영됩니다. 좌측 설정은 ‘예측 시작’ 버튼을 눌러야 반영됩니다.")
-    years_view = st.multiselect("표시할 실적 연도", options=res["years_all"],
-                                default=st.session_state.get("sales_years_view", res["years_all"][-5:]),
-                                key="sales_years_view")
+
+    if "sales_years_view" not in st.session_state:
+        st.session_state["sales_years_view"] = res["years_all"][-5:] if len(res["years_all"])>=5 else res["years_all"]
+
+    years_view = st.multiselect("표시할 실적 연도", options=res["years_all"], key="sales_years_view")
 
     months = list(range(1,13))
     fig = plt.figure(figsize=(9,3.6)); ax = plt.gca()
