@@ -1,4 +1,4 @@
-# app.py — 도시가스 공급·판매 분석 (Poly-3 + Poly-4 + HDD/CDD+Fourier 리더보드)
+# app.py — 도시가스 공급·판매 분석 (Poly-3 + Poly-4 비교)
 
 import os
 from pathlib import Path
@@ -149,7 +149,7 @@ def read_temperature_raw(file):
 def month_start(x): x = pd.to_datetime(x); return pd.Timestamp(x.year, x.month, 1)
 def month_range_inclusive(s, e): return pd.date_range(start=month_start(s), end=month_start(e), freq="MS")
 
-# ── 모델들 ───────────────────────────────────────────────────
+# --- Poly3
 def fit_poly3_and_predict(x_train, y_train, x_future):
     m = (~np.isnan(x_train)) & (~np.isnan(y_train))
     x_train, y_train = x_train[m], y_train[m]
@@ -162,6 +162,7 @@ def fit_poly3_and_predict(x_train, y_train, x_future):
     y_future = model.predict(poly.transform(x_future))
     return y_future, r2, model, poly
 
+# --- Poly4
 def fit_poly4_and_predict(x_train, y_train, x_future):
     m = (~np.isnan(x_train)) & (~np.isnan(y_train))
     x_train, y_train = x_train[m], y_train[m]
@@ -174,69 +175,22 @@ def fit_poly4_and_predict(x_train, y_train, x_future):
     y_future = model.predict(poly.transform(x_future))
     return y_future, r2, model, poly
 
-def poly_eq_text(m):
-    c = m.coef_
+def poly_eq_text(model):
+    c = model.coef_
     c1 = c[0] if len(c)>0 else 0.0
     c2 = c[1] if len(c)>1 else 0.0
     c3 = c[2] if len(c)>2 else 0.0
-    d  = m.intercept_
+    d  = model.intercept_
     return f"y = {c3:+.5e}x³ {c2:+.5e}x² {c1:+.5e}x {d:+.5e}"
 
-def poly_eq_text4(m):
-    c = m.coef_
+def poly_eq_text4(model):
+    c = model.coef_
     c1 = c[0] if len(c)>0 else 0.0
     c2 = c[1] if len(c)>1 else 0.0
     c3 = c[2] if len(c)>2 else 0.0
     c4 = c[3] if len(c)>3 else 0.0
-    d  = m.intercept_
+    d  = model.intercept_
     return f"y = {c4:+.5e}x⁴ {c3:+.5e}x³ {c2:+.5e}x² {c1:+.5e}x {d:+.5e}"
-
-# ── HDD/CDD + Fourier ───────────────────────────────────────
-def _design_hddcdd_fourier(temp, month, Tstar=18.0, K=2):
-    temp = np.asarray(temp, dtype=float)
-    month = np.asarray(month, dtype=float)
-    HDD = np.maximum(0.0, Tstar - temp)
-    CDD = np.maximum(0.0, temp - Tstar)
-    feats = [HDD, CDD]; names = ["HDD", "CDD"]
-    for k in range(1, int(K)+1):
-        ang = 2*np.pi*k*month/12.0
-        feats += [np.sin(ang), np.cos(ang)]
-        names += [f"sin{k}", f"cos{k}"]
-    X = np.column_stack(feats)
-    return X, names
-
-def fit_hddcdd_fourier(temp_train, month_train, y_train, Tstar=18.0, K=2):
-    mask = (~np.isnan(temp_train)) & (~np.isnan(y_train))
-    t = np.asarray(temp_train, float)[mask]
-    m = np.asarray(month_train, float)[mask]
-    y = np.asarray(y_train, float)[mask]
-    X, names = _design_hddcdd_fourier(t, m, Tstar, K)
-    model = LinearRegression().fit(X, y)
-    r2 = model.score(X, y)
-    return model, names, r2
-
-def predict_hddcdd_fourier(model, temp_future, month_future, Tstar=18.0, K=2):
-    Xf, _ = _design_hddcdd_fourier(temp_future, month_future, Tstar, K)
-    return model.predict(Xf)
-
-def hddcdd_eq_text(model, names):
-    parts = [f"{coef:+.5e}·{name}" for coef, name in zip(model.coef_, names)]
-    return "y = " + " ".join(parts) + f" {model.intercept_:+.5e}"
-
-def _mape(y, yhat):
-    y = np.asarray(y, float); yhat = np.asarray(yhat, float)
-    mask = y != 0
-    if mask.sum() == 0: return np.nan
-    return np.mean(np.abs((yhat[mask]-y[mask])/y[mask]))*100.0
-
-def _mae(y, yhat):
-    y = np.asarray(y, float); yhat = np.asarray(yhat, float)
-    return np.mean(np.abs(yhat - y))
-
-def _r2(y, yhat):
-    y = np.asarray(y, float); yhat = np.asarray(yhat, float)
-    sse = np.sum((y - yhat)**2); sst = np.sum((y - np.mean(y))**2)
-    return 1 - sse/sst if sst>0 else np.nan
 
 def render_centered_table(df: pd.DataFrame, float1_cols=None, int_cols=None, index=False):
     float1_cols = float1_cols or []; int_cols = int_cols or []
@@ -256,10 +210,10 @@ def render_centered_table(df: pd.DataFrame, float1_cols=None, int_cols=None, ind
     st.markdown(show.to_html(index=index, classes="centered-table"), unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────
-# 분석 유형(화면)
+# 분석 유형
 with st.sidebar:
     st.header("분석 유형")
-    mode = st.radio("선택", ["공급량 분석", "판매량 분석(냉방용)", "모델 비교(정확도 리더보드)"], index=0)
+    mode = st.radio("선택", ["공급량 분석", "판매량 분석(냉방용)"], index=0)
 
 # =============== A) 공급량 분석 ==========================================
 if mode == "공급량 분석":
@@ -418,11 +372,12 @@ if mode == "공급량 분석":
     )
 
     x_future_norm = (fut_base["temp"] + float(d_norm)).astype(float).values
-    months = list(range(1,13))
 
     for prod in prods:
+        # ① 월 시계열 + 예측
         y_train_prod = train_df[prod].astype(float).values
         y_future_norm, r2_train, model, poly = fit_poly3_and_predict(x_train, y_train_prod, x_future_norm)
+
         P = fut_base[["연","월"]].copy()
         P["pred"] = np.clip(np.rint(y_future_norm).astype(np.int64), a_min=0, a_max=None)
 
@@ -442,29 +397,37 @@ if mode == "공급량 분석":
         ax.set_xlim(1,12); ax.set_xticks(months); ax.set_xticklabels([f"{mm}월" for mm in months])
         ax.set_xlabel("월"); ax.set_ylabel("공급량 (MJ)")
         ax.set_title(f"{prod} — Poly-3 (Train R²={r2_train:.3f})"); ax.legend(loc="best")
-        ax.text(0.02, 0.96, f"Poly-3: {poly_eq_text(model)}", transform=ax.transAxes,
-                ha="left", va="top", fontsize=9, color="#1f77b4",
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
+        ax.text(0.02, 0.96, f"Poly-3: {poly_eq_text(model)}",
+                transform=ax.transAxes, ha="left", va="top", fontsize=9,
+                color="#1f77b4", bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
         plt.tight_layout(); st.pyplot(fig, clear_figure=True)
 
-        # ② 기온-공급량 상관(Poly-3)
+        # ② 기온-공급량 상관(Poly-3) + 95% 신뢰구간
         figc, axc = plt.subplots(figsize=(9,4.4))
-        x_tr = train_df[detect_temp_col(train_df)].astype(float).values
+        x_tr = train_df[temp_col].astype(float).values
         y_tr = y_train_prod
         axc.scatter(x_tr, y_tr, alpha=0.65, label="학습 샘플")
+
         xx = np.linspace(np.nanmin(x_tr)-1, np.nanmax(x_tr)+1, 200)
         yhat, _, model_s, _ = fit_poly3_and_predict(x_tr, y_tr, xx)
         axc.plot(xx, yhat, lw=2.6, color="#1f77b4", label="Poly-3")
+
         pred_train, _, _, _ = fit_poly3_and_predict(x_tr, y_tr, x_tr)
         resid = y_tr - pred_train
         s = np.nanstd(resid)
         axc.fill_between(xx, yhat-1.96*s, yhat+1.96*s, color="#1f77b4", alpha=0.14, label="95% 신뢰구간")
+
         axc.set_xlabel("기온 (℃)"); axc.set_ylabel("공급량 (MJ)")
         axc.grid(alpha=0.25); axc.legend(loc="best")
+        xmin, xmax = axc.get_xlim(); ymin, ymax = axc.get_ylim()
+        axc.text(xmin + 0.02*(xmax-xmin), ymin + 0.06*(ymax-ymin),
+                 f"Poly-3: {poly_eq_text(model_s)}",
+                 fontsize=10, color="#1f77b4",
+                 bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
         st.pyplot(figc)
 
 # =============== B) 판매량 분석(냉방용) =====================================
-elif mode == "판매량 분석(냉방용)":
+else:
     st.header("판매량 분석(냉방용) — 전월 16일 ~ 당월 15일 평균기온 기준")
     st.write("냉방용 **판매 실적 엑셀**과 **기온 RAW(일별)**을 준비하세요.")
 
@@ -568,25 +531,22 @@ elif mode == "판매량 분석(냉방용)":
 
         train_sales = sales_df[sales_df["연"].isin(years_sel)].copy()
         rows = [{"판매월":m, "기간평균기온": period_avg(m)} for m in train_sales["판매월"].unique()]
-        sj = pd.merge(train_sales[["판매월","판매량","연","월"]], pd.DataFrame(rows), on="판매월", how="left")
+        sj = pd.merge(train_sales[["판매월","판매량"]], pd.DataFrame(rows), on="판매월", how="left")
         miss = sj["기간평균기온"].isna()
         if miss.any(): sj.loc[miss,"기간평균기온"] = sj.loc[miss,"판매월"].dt.month.map(fallback_by_M)
         sj = sj.dropna(subset=["기간평균기온","판매량"])
 
-        # 학습 벡터(다항식 용)
         x_train = sj["기간평균기온"].astype(float).values
         y_train = sj["판매량"].astype(float).values
         _, r2_fit, model_fit, _ = fit_poly3_and_predict(x_train, y_train, x_train)
         _, r2_fit4, model_fit4, _ = fit_poly4_and_predict(x_train, y_train, x_train)
 
-        # 미래 예측 베이스
         f_start = pd.Timestamp(year=int(start_y), month=int(start_m), day=1)
         f_end   = pd.Timestamp(year=int(end_y),   month=int(end_m),   day=1)
         if f_end < f_start: st.error("예측 종료가 시작보다 빠릅니다."); st.stop()
 
         months = month_range_inclusive(f_start, f_end)
         rows = []
-        monthly_cal = monthly_cal  # from above
         for m in months:
             s = (m - pd.offsets.MonthBegin(1)) + pd.DateOffset(days=15)
             e = m + pd.DateOffset(days=14)
@@ -599,16 +559,12 @@ elif mode == "판매량 분석(냉방용)":
             miss = pred_base[c].isna()
             if miss.any(): pred_base.loc[miss,c] = pred_base.loc[miss,"월"].map(fallback_by_M)
 
-        # 학습 테이블(리더보드용) 저장
-        train_tbl = sj[["연","월","판매량","기간평균기온"]].rename(columns={"판매량":"y","기간평균기온":"temp"}).copy()
-
         st.session_state["sales_materials"] = dict(
-            sales_df=sales_df, temp_raw=temp_raw, years_all=years_all, years_sel=years_sel,
+            sales_df=sales_df, temp_raw=temp_raw, years_all=years_all,
             train_xy=(x_train, y_train),
             r2_fit=r2_fit, model_fit=model_fit,
             r2_fit4=r2_fit4, model_fit4=model_fit4,
-            pred_base=pred_base, f_start=f_start, f_end=f_end,
-            train_tbl=train_tbl
+            pred_base=pred_base, f_start=f_start, f_end=f_end
         )
         st.success("냉방용 판매량 예측(베이스) 준비 완료! 아래에서 시나리오 Δ°C를 조절하세요.")
 
@@ -622,9 +578,15 @@ elif mode == "판매량 분석(냉방용)":
     r2_fit, r2_fit4 = sm["r2_fit"], sm["r2_fit4"]
     years_all = sm["years_all"]
 
-    # ★★★ 다항식 보기 선택 ★★★
+    # ★★★ 다항식 보기 선택(성공 배너 바로 아래) ★★★
     st.markdown("#### 다항식 보기 선택")
-    view_choice = st.radio("다항식", options=["3차(Poly-3)", "4차(Poly-4)", "둘 다"], index=2, horizontal=True, key="poly_view_choice")
+    view_choice = st.radio(
+        "다항식",
+        options=["3차(Poly-3)", "4차(Poly-4)", "둘 다"],
+        index=2,
+        horizontal=True,
+        key="poly_view_choice"
+    )
     show_poly3 = view_choice in ["3차(Poly-3)", "둘 다"]
     show_poly4 = view_choice in ["4차(Poly-4)", "둘 다"]
 
@@ -661,20 +623,44 @@ elif mode == "판매량 분석(냉방용)":
         sale_c = forecast_sales_table(d_cons)
         render_centered_table(sale_c, float1_cols=["월평균기온(적용)","기간평균기온(적용)"], int_cols=["예측판매량"], index=False)
 
-        st.download_button("판매량 예측 CSV 다운로드 (Poly-3 · Normal)",
-                           data=sale_n.to_csv(index=False).encode("utf-8-sig"),
-                           file_name="cooling_sales_forecast_poly3_normal.csv", mime="text/csv")
+        st.download_button(
+            "판매량 예측 CSV 다운로드 (Poly-3 · Normal)",
+            data=sale_n.to_csv(index=False).encode("utf-8-sig"),
+            file_name="cooling_sales_forecast_poly3_normal.csv", mime="text/csv"
+        )
 
-        # 그래프 — Poly-3
+        # ▶ 판매량 예측 검증 (Normal 기준, Poly-3)
+        st.subheader("판매량 예측 검증 — Poly-3")
+        valid_pred = sale_n[sale_n["월"]!="종계"].copy()
+        valid_pred["연"] = pd.to_numeric(valid_pred["연"], errors="coerce").astype("Int64")
+        valid_pred["월"] = pd.to_numeric(valid_pred["월"], errors="coerce").astype("Int64")
+        comp = pd.merge(
+            valid_pred[["연","월","예측판매량"]],
+            sales_df[["연","월","판매량"]].rename(columns={"판매량":"실제판매량"}),
+            on=["연","월"], how="left"
+        ).sort_values(["연","월"])
+        comp["오차"] = (comp["예측판매량"] - comp["실제판매량"]).astype("Int64")
+        comp["오차율(%)"] = ((comp["오차"] / comp["실제판매량"]) * 100).round(1).astype("Float64")
+        render_centered_table(
+            comp[["연","월","실제판매량","예측판매량","오차","오차율(%)"]],
+            int_cols=["실제판매량","예측판매량","오차"], index=False
+        )
+
+        # 그래프 1: 연도별 월 시계열 + 예측(Normal, Poly-3)
         st.subheader("그래프 (Normal 기준) — Poly-3")
         years_default = years_all[-5:] if len(years_all)>=5 else years_all
-        years_view = st.multiselect("표시할 실적 연도", options=years_all,
-                                    default=st.session_state.get("sales_years_view", years_default),
-                                    key="sales_years_view")
+        years_view = st.multiselect(
+            "표시할 실적 연도",
+            options=years_all,
+            default=st.session_state.get("sales_years_view", years_default),
+            key="sales_years_view"
+        )
 
         base_plot = pred_base.copy()
         base_plot["기간평균기온(적용)"] = base_plot["기간평균기온"] + d_norm
-        y_pred_norm, r2_line, model_line, _ = fit_poly3_and_predict(x_train, y_train, base_plot["기간평균기온(적용)"].values.astype(float))
+        y_pred_norm, r2_line, model_line, _ = fit_poly3_and_predict(
+            x_train, y_train, base_plot["기간평균기온(적용)"].values.astype(float)
+        )
         base_plot["pred"] = np.clip(np.rint(y_pred_norm).astype(np.int64), 0, None)
 
         months = list(range(1,13))
@@ -698,11 +684,37 @@ elif mode == "판매량 분석(냉방용)":
         ax2.legend(loc="best"); ax2.grid(alpha=0.25)
         ax2.text(0.02, 0.96, f"Poly-3: {poly_eq_text(model_line)}",
                  transform=ax2.transAxes, ha="left", va="top", fontsize=9,
-                 bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
+                 color="#1f77b4", bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
         st.pyplot(fig2)
 
-    # ───────────── Poly-4 (동일 UI + 연도선택 별도) ─────────────
-    if view_choice in ["4차(Poly-4)", "둘 다"]:
+        # 그래프 2: 기온-판매량 산점 + Poly3 + 95% 신뢰구간 + 방정식
+        st.subheader(f"기온-냉방용 실적 상관관계 (Train, R²={r2_fit:.3f}) — Poly-3")
+        fig3, ax3 = plt.subplots(figsize=(10,5.2))
+        ax3.scatter(x_train, y_train, alpha=0.65, label="학습 샘플")
+
+        xx = np.linspace(np.nanmin(x_train)-1, np.nanmax(x_train)+1, 200)
+        yhat, _, model_s, _ = fit_poly3_and_predict(x_train, y_train, xx)
+        ax3.plot(xx, yhat, lw=2.6, color="#1f77b4", label="Poly-3")
+
+        pred_train, _, _, _ = fit_poly3_and_predict(x_train, y_train, x_train)
+        resid = y_train - pred_train
+        s = np.nanstd(resid)
+        ax3.fill_between(xx, yhat-1.96*s, yhat+1.96*s, color="#1f77b4", alpha=0.14, label="95% 신뢰구간")
+
+        bins = np.linspace(np.nanmin(x_train), np.nanmax(x_train), 15)
+        gb = pd.DataFrame({"bin": pd.cut(x_train, bins), "y": y_train}).groupby("bin")["y"].median().reset_index()
+        gb["x"] = [b.mid for b in gb["bin"]]
+        ax3.scatter(gb["x"], gb["y"], label="온도별 중앙값", s=65)
+        ax3.set_xlabel("기간평균기온 (℃)"); ax3.set_ylabel("판매량 (MJ)")
+        ax3.grid(alpha=0.25); ax3.legend(loc="best")
+        xmin, xmax = ax3.get_xlim(); ymin, ymax = ax3.get_ylim()
+        ax3.text(xmin + 0.02*(xmax-xmin), ymin + 0.06*(ymax-ymin),
+                 f"Poly-3: {poly_eq_text(model_s)}",
+                 fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
+        st.pyplot(fig3)
+
+    # ───────────── Poly-4 (동일 UI, 연도선택 추가) ─────────────
+    if show_poly4:
         st.markdown("---")
         st.header("Poly-4 비교 (동일 시나리오 UI)")
         st.subheader("시나리오 Δ°C (평균기온 보정) — Poly-4")
@@ -736,20 +748,46 @@ elif mode == "판매량 분석(냉방용)":
         sale4_c = forecast_sales_table_poly4(d4_cons)
         render_centered_table(sale4_c, float1_cols=["월평균기온(적용)","기간평균기온(적용)"], int_cols=["예측판매량"], index=False)
 
-        st.download_button("판매량 예측 CSV 다운로드 (Poly-4 · Normal)",
-                           data=sale4_n.to_csv(index=False).encode("utf-8-sig"),
-                           file_name="cooling_sales_forecast_poly4_normal.csv", mime="text/csv")
+        st.download_button(
+            "판매량 예측 CSV 다운로드 (Poly-4 · Normal)",
+            data=sale4_n.to_csv(index=False).encode("utf-8-sig"),
+            file_name="cooling_sales_forecast_poly4_normal.csv", mime="text/csv"
+        )
 
-        # 그래프 — Poly-4
+        # ▶ 판매량 예측 검증 (Normal 기준, Poly-4)
+        st.subheader("판매량 예측 검증 — Poly-4")
+        valid_pred4 = sale4_n[sale4_n["월"]!="종계"].copy()
+        valid_pred4["연"] = pd.to_numeric(valid_pred4["연"], errors="coerce").astype("Int64")
+        valid_pred4["월"] = pd.to_numeric(valid_pred4["월"], errors="coerce").astype("Int64")
+        comp4 = pd.merge(
+            valid_pred4[["연","월","예측판매량"]],
+            sales_df[["연","월","판매량"]].rename(columns={"판매량":"실제판매량"}),
+            on=["연","월"], how="left"
+        ).sort_values(["연","월"])
+        comp4["오차"] = (comp4["예측판매량"] - comp4["실제판매량"]).astype("Int64")
+        comp4["오차율(%)"] = ((comp4["오차"] / comp4["실제판매량"]) * 100).round(1).astype("Float64")
+        render_centered_table(
+            comp4[["연","월","실제판매량","예측판매량","오차","오차율(%)"]],
+            int_cols=["실제판매량","예측판매량","오차"], index=False
+        )
+
+        # 그래프 1: 연도별 월 시계열 + 예측(Normal, Poly-4)
         st.subheader("그래프 (Normal 기준) — Poly-4")
         years_default4 = years_all[-5:] if len(years_all)>=5 else years_all
-        years_view4 = st.multiselect("표시할 실적 연도", options=years_all,
-                                     default=st.session_state.get("sales_years_view4", years_default4),
-                                     key="sales_years_view4")
+        years_view4 = st.multiselect(
+            "표시할 실적 연도",
+            options=years_all,
+            default=st.session_state.get("sales_years_view4", years_default4),
+            key="sales_years_view4"
+        )
+
         base_plot4 = pred_base.copy()
         base_plot4["기간평균기온(적용)"] = base_plot4["기간평균기온"] + d4_norm
-        y_pred_norm4, r2_line4, model_line4, _ = fit_poly4_and_predict(x_train, y_train, base_plot4["기간평균기온(적용)"].values.astype(float))
+        y_pred_norm4, r2_line4, model_line4, _ = fit_poly4_and_predict(
+            x_train, y_train, base_plot4["기간평균기온(적용)"].values.astype(float)
+        )
         base_plot4["pred"] = np.clip(np.rint(y_pred_norm4).astype(np.int64), 0, None)
+
         months = list(range(1,13))
         fig24, ax24 = plt.subplots(figsize=(10,4.2))
         for yv in years_view4:
@@ -774,126 +812,28 @@ elif mode == "판매량 분석(냉방용)":
                   bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
         st.pyplot(fig24)
 
-# =============== C) 모델 비교(정확도 리더보드) ============================
-else:
-    st.header("모델 비교(정확도 리더보드) — Poly-3 vs Poly-4 vs HDD/CDD+Fourier")
-    if "sales_materials" not in st.session_state:
-        st.info("먼저 ‘판매량 분석(냉방용)’ 화면에서 베이스를 준비해 주세요.")
-        st.stop()
+        # 그래프 2: 기온-판매량 산점 + Poly-4 + 95% 신뢰구간
+        st.subheader(f"기온-냉방용 실적 상관관계 (Train, R²={r2_fit4:.3f}) — Poly-4")
+        fig34, ax34 = plt.subplots(figsize=(10,5.2))
+        ax34.scatter(x_train, y_train, alpha=0.65, label="학습 샘플")
 
-    sm = st.session_state["sales_materials"]
-    sales_df   = sm["sales_df"]
-    pred_base  = sm["pred_base"].copy()
-    train_tbl  = sm["train_tbl"].copy()   # columns: 연,월,y,temp
-    years_all  = sm["years_all"]; years_sel = sm["years_sel"]
+        xx4 = np.linspace(np.nanmin(x_train)-1, np.nanmax(x_train)+1, 200)
+        yhat4, _, model_s4, _ = fit_poly4_and_predict(x_train, y_train, xx4)
+        ax34.plot(xx4, yhat4, lw=2.6, label="Poly-4")
 
-    # ─ UI: HDD/CDD+Fourier 설정 + Δ°C 시나리오 ─
-    st.subheader("HDD/CDD + Fourier 설정")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        Tstar = st.number_input("균형온도 T* (℃)", value=18.0, step=0.5, format="%.1f")
-    with c2:
-        K = st.selectbox("Fourier 차수 k", [1,2,3], index=1)
-    with c3:
-        d_norm = st.number_input("Normal Δ°C", value=0.0, step=0.5, format="%.1f", key="hf_norm")
-    with c4:
-        years_default = years_all[-5:] if len(years_all)>=5 else years_all
-        years_view = st.multiselect("표시할 실적 연도", options=years_all,
-                                    default=st.session_state.get("hf_years_view", years_default),
-                                    key="hf_years_view")
+        pred_train4, _, _, _ = fit_poly4_and_predict(x_train, y_train, x_train)
+        resid4 = y_train - pred_train4
+        s4 = np.nanstd(resid4)
+        ax34.fill_between(xx4, yhat4-1.96*s4, yhat4+1.96*s4, alpha=0.14, label="95% 신뢰구간")
 
-    # ─ 예측 테이블/그래프(현재 시나리오) : HDD/CDD+Fourier ─
-    base_hf = pred_base.copy()
-    base_hf["기간평균기온(적용)"] = base_hf["기간평균기온"] + d_norm
-    model_hf, names_hf, r2_hf = fit_hddcdd_fourier(
-        temp_train=train_tbl["temp"].values, month_train=train_tbl["월"].values, y_train=train_tbl["y"].values,
-        Tstar=Tstar, K=K
-    )
-    y_future_hf = predict_hddcdd_fourier(
-        model_hf, base_hf["기간평균기온(적용)"].values, base_hf["월"].values,
-        Tstar=Tstar, K=K
-    )
-    base_hf["예측판매량"] = np.clip(np.rint(y_future_hf).astype(np.int64), 0, None)
-    out = base_hf[["연","월","기간평균기온(적용)","예측판매량"]].copy()
-    out.loc[len(out)] = ["", "종계", "", int(out["예측판매량"].sum())]
-
-    st.markdown("### HDD/CDD+Fourier — 시나리오 결과")
-    render_centered_table(out, float1_cols=["기간평균기온(적용)"], int_cols=["예측판매량"], index=False)
-    st.download_button(
-        "HDD/CDD+Fourier 예측 CSV 다운로드 (Normal)",
-        data=out.to_csv(index=False).encode("utf-8-sig"),
-        file_name="cooling_sales_forecast_hddcdd_fourier_normal.csv", mime="text/csv"
-    )
-
-    st.markdown("### 그래프 (Normal 기준) — HDD/CDD+Fourier")
-    months = list(range(1,13))
-    fig, ax = plt.subplots(figsize=(10,4.2))
-    for y in years_view:
-        one = sales_df[sales_df["연"]==y][["월","판매량"]].dropna()
-        if not one.empty:
-            ax.plot(one["월"], one["판매량"], label=f"{y} 실적", alpha=0.95)
-    # 12개월 예측 라인
-    pred_vals = []
-    y0, m0 = int(sm["f_start"].year), int(sm["f_start"].month)
-    P2 = base_hf[["연","월","예측판매량"]].astype(int)
-    for _ in range(12):
-        row = P2[(P2["연"]==y0)&(P2["월"]==m0)]
-        pred_vals.append(row.iloc[0]["예측판매량"] if len(row) else np.nan)
-        if m0==12: y0+=1; m0=1
-        else: m0+=1
-    ax.plot(months, pred_vals, "--", lw=2.5, label="예측(Normal)")
-    ax.set_xlim(1,12); ax.set_xticks(months); ax.set_xticklabels([f"{mm}월" for mm in months])
-    ax.set_xlabel("월"); ax.set_ylabel("판매량 (MJ)")
-    ax.set_title(f"HDD/CDD+Fourier (Train R²={r2_hf:.3f})")
-    ax.legend(loc="best"); ax.grid(alpha=0.25)
-    ax.text(0.02, 0.96, hddcdd_eq_text(model_hf, names_hf),
-            transform=ax.transAxes, ha="left", va="top", fontsize=9,
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
-    st.pyplot(fig)
-
-    # ─ 정확도 리더보드 (연도별 LOYO) ─
-    st.markdown("---")
-    st.subheader("정확도 리더보드 — LOYO(연도별 교차검증)")
-
-    # LOYO 함수
-    def loyo_by_year(tbl: pd.DataFrame, Tstar: float, K: int):
-        years = sorted(tbl["연"].unique().tolist())
-        y_true_all, yhat3_all, yhat4_all, yhf_all = [], [], [], []
-        for yy in years:
-            tr = tbl[tbl["연"]!=yy].copy()
-            te = tbl[tbl["연"]==yy].copy()
-            if len(tr)<3 or len(te)==0:  # 데이터 부족시 skip
-                continue
-            # Poly-3
-            y3,_,_,_ = fit_poly3_and_predict(tr["temp"].values, tr["y"].values, te["temp"].values)
-            # Poly-4
-            y4,_,_,_ = fit_poly4_and_predict(tr["temp"].values, tr["y"].values, te["temp"].values)
-            # HDD/CDD+Fourier
-            mhf, _, _ = fit_hddcdd_fourier(tr["temp"].values, tr["월"].values, tr["y"].values, Tstar, K)
-            yhf = predict_hddcdd_fourier(mhf, te["temp"].values, te["월"].values, Tstar, K)
-
-            y_true_all.extend(te["y"].values.tolist())
-            yhat3_all.extend(y3.tolist()); yhat4_all.extend(y4.tolist()); yhf_all.extend(yhf.tolist())
-
-        y_true = np.array(y_true_all, float)
-        y3 = np.array(yhat3_all, float); y4 = np.array(yhat4_all, float); yhf = np.array(yhf_all, float)
-
-        rows = []
-        for name, yhat in [("Poly-3", y3), ("Poly-4", y4), ("HDD/CDD+Fourier", yhf)]:
-            rows.append({
-                "모델": name,
-                "MAPE(%)": np.round(_mape(y_true, yhat), 2),
-                "MAE": np.round(_mae(y_true, yhat), 0).astype(int),
-                "R²": np.round(_r2(y_true, yhat), 3),
-                "테스트수(n)": int(len(y_true))
-            })
-        df = pd.DataFrame(rows).sort_values("MAPE(%)", ascending=True).reset_index(drop=True)
-        return df
-
-    board = loyo_by_year(train_tbl, Tstar, int(K))
-    render_centered_table(board, int_cols=["MAE","테스트수(n)"], index=False)
-    st.download_button(
-        "리더보드 CSV 다운로드",
-        data=board.to_csv(index=False).encode("utf-8-sig"),
-        file_name="model_leaderboard_loyo.csv", mime="text/csv"
-    )
+        bins4 = np.linspace(np.nanmin(x_train), np.nanmax(x_train), 15)
+        gb4 = pd.DataFrame({"bin": pd.cut(x_train, bins4), "y": y_train}).groupby("bin")["y"].median().reset_index()
+        gb4["x"] = [b.mid for b in gb4["bin"]]
+        ax34.scatter(gb4["x"], gb4["y"], s=65, label="온도별 중앙값")
+        ax34.set_xlabel("기간평균기온 (℃)"); ax34.set_ylabel("판매량 (MJ)")
+        ax34.grid(alpha=0.25); ax34.legend(loc="best")
+        xmin4, xmax4 = ax34.get_xlim(); ymin4, ymax4 = ax34.get_ylim()
+        ax34.text(xmin4 + 0.02*(xmax4-xmin4), ymin4 + 0.06*(ymax4-ymin4),
+                  f"Poly-4: {poly_eq_text4(model_s4)}",
+                  fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
+        st.pyplot(fig34)
