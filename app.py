@@ -235,7 +235,7 @@ def render_centered_table(df: pd.DataFrame, float1_cols=None, int_cols=None, ind
 # ─────────────────────────────────────────────────────────────
 # 분석 유형
 with st.sidebar:
-    st.header("분석 유형")
+    title_with_icon("🧭", "분석 유형", "h3")
     mode = st.radio("선택", ["공급량 분석", "판매량 분석(냉방용)"], index=0)
 
 # ======================= A) 공급량 분석 =======================
@@ -243,7 +243,7 @@ if mode == "공급량 분석":
 
     # 1) 좌측: 데이터 불러오기(실적 + 예상기온)
     with st.sidebar:
-        st.header("데이터 불러오기")
+        title_with_icon("📂", "데이터 불러오기", "h3")
         src = st.radio("방식", ["Repo 내 파일 사용", "파일 업로드"], index=0)
 
         supply_df = None
@@ -287,9 +287,9 @@ if mode == "공급량 분석":
 
     df = supply_df
 
-    # 2) 좌측: 학습/상품/기간 설정 (← 여기로 이동)
+    # 2) 좌측: 학습/상품/기간 설정
     with st.sidebar:
-        st.header("학습 데이터 연도 선택")
+        title_with_icon("🧪", "학습 데이터 연도 선택", "h3")
         years_all = sorted([int(y) for y in pd.Series(df["연"]).dropna().unique()])
         years_sel = st.multiselect("연도 선택", years_all, default=years_all)
 
@@ -297,12 +297,12 @@ if mode == "공급량 분석":
         if temp_col is None:
             st.error("기온 열을 찾지 못했습니다. '평균기온' 또는 '기온' 포함 필요.")
 
-        st.header("예측할 상품 선택")
+        title_with_icon("🛒", "예측할 상품 선택", "h3")
         product_cols = guess_product_cols(df)
         default_products = [c for c in KNOWN_PRODUCT_ORDER if c in product_cols] or product_cols[:6]
         prods = st.multiselect("상품(용도) 선택", product_cols, default=default_products)
 
-        st.header("예측 설정")
+        title_with_icon("⏱️", "예측 설정", "h3")
         last_year = int(df["연"].max())
         col1, col2 = st.columns(2)
         with col1:
@@ -355,7 +355,7 @@ if mode == "공급량 분석":
     temp_col = mats["temp_col"]
     months = list(range(1,13))
 
-    st.subheader("시나리오 Δ°C (예상기온 대비 보정)")
+    title_with_icon("🌡️", "시나리오 Δ°C (예상기온 대비 보정)", "h2")
     st.caption("예상기온은 **기온예측 파일의 기온을 사용했어.**")
     c1, c2, c3 = st.columns(3)
     with c1: d_norm = st.number_input("Normal Δ°C", value=0.0, step=0.5, format="%.1f", key="s_norm")
@@ -387,17 +387,17 @@ if mode == "공급량 분석":
         tot["연"] = ""
         return pd.concat([pivot, pd.DataFrame([tot])], ignore_index=True)
 
-    st.markdown("### Normal")
+    title_with_icon("🙂", "Normal", "h3")
     tbl_n = _forecast_table_for_delta(d_norm)
     render_centered_table(tbl_n, float1_cols=["월평균기온"],
                           int_cols=[c for c in tbl_n.columns if c not in ["연","월","월평균기온"]], index=False)
 
-    st.markdown("### Best")
+    title_with_icon("🚀", "Best", "h3")
     tbl_b = _forecast_table_for_delta(d_best)
     render_centered_table(tbl_b, float1_cols=["월평균기온"],
                           int_cols=[c for c in tbl_b.columns if c not in ["연","월","월평균기온"]], index=False)
 
-    st.markdown("### Conservative")
+    title_with_icon("🛡️", "Conservative", "h3")
     tbl_c = _forecast_table_for_delta(d_cons)
     render_centered_table(tbl_c, float1_cols=["월평균기온"],
                           int_cols=[c for c in tbl_c.columns if c not in ["연","월","월평균기온"]], index=False)
@@ -410,8 +410,7 @@ if mode == "공급량 분석":
                        data=tbl_all.to_csv(index=False).encode("utf-8-sig"),
                        file_name="citygas_supply_forecast_all_scenarios.csv", mime="text/csv")
 
-    # 그래프 (Normal 기준)
-    st.markdown("### 그래프 (Normal 기준)")
+    title_with_icon("📈", "그래프 (Normal 기준)", "h3")
     years_all_for_plot = sorted([int(v) for v in base["연"].dropna().unique()])
     default_years = years_all_for_plot[-5:] if len(years_all_for_plot) >= 5 else years_all_for_plot
     years_view = st.multiselect("표시할 실적 연도", options=years_all_for_plot,
@@ -477,7 +476,7 @@ else:
     st.write("냉방용 **판매 실적 엑셀**과 **기온 RAW(일별)**을 준비하세요.")
 
     with st.sidebar:
-        st.header("데이터 불러오기")
+        title_with_icon("📂", "데이터 불러오기", "h3")
         sales_src = st.radio("방식", ["Repo 내 파일 사용", "파일 업로드"], index=0)
 
     def _find_repo_sales_and_temp():
@@ -543,11 +542,11 @@ else:
         st.error("기온 RAW에서 날짜/기온 열을 찾지 못했습니다."); st.stop()
 
     with st.sidebar:
-        st.subheader("학습 데이터 연도 선택")
+        title_with_icon("🧪", "학습 데이터 연도 선택", "h3")
         years_all = sorted(sales_df["연"].unique().tolist())
         years_sel  = st.multiselect("연도 선택", options=years_all, default=years_all)
 
-        st.subheader("예측 설정")
+        title_with_icon("⏱️", "예측 설정", "h3")
         last_year = int(sales_df["연"].max())
         col1, col2 = st.columns(2)
         with col1:
