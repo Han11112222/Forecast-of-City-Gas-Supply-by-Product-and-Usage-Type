@@ -1,4 +1,5 @@
 # app.py — 도시가스 공급·판매 예측 (Poly-3) · 실적/Normal/추세분석 그래프 + 동적 상관차트
+# (사이드바: 연/월을 하나의 콤보로 선택 — columns 사용 안함)
 
 import os
 from pathlib import Path
@@ -11,15 +12,10 @@ from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
 import streamlit as st
 from glob import glob
-
-# 동적 차트
 import plotly.graph_objects as go
 
-# ─────────────────────────────────────────────────────────────
-# 기본
 st.set_page_config(page_title="도시가스 공급·판매 예측 (Poly-3)", layout="wide")
 
-# (제목/섹션 왼쪽 아이콘 유틸 + 표 중앙정렬)
 st.markdown("""
 <style>
 .icon-title{display:flex;align-items:center;gap:.55rem;margin:.2rem 0 .6rem 0}
@@ -35,7 +31,6 @@ def title_with_icon(icon: str, text: str, level: str = "h1", small=False):
     st.markdown(f"<{level} class='{klass}'><span class='emoji'>{icon}</span><span>{text}</span></{level}>",
                 unsafe_allow_html=True)
 
-# 상단 타이틀
 title_with_icon("📊", "도시가스 공급량·판매량 예측 (Poly-3)")
 st.caption("공급량: 기온↔공급량 3차 다항식 · 판매량(냉방용): (전월16~당월15) 평균기온 기반")
 
@@ -43,7 +38,6 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 # ─────────────────────────────────────────────────────────────
-# 한글 폰트
 def set_korean_font():
     here = Path(__file__).parent if "__file__" in globals() else Path.cwd()
     candidates = [
@@ -71,7 +65,6 @@ def set_korean_font():
     return False
 set_korean_font()
 
-# 공통 유틸
 META_COLS = {"날짜", "일자", "date", "연", "년", "월"}
 TEMP_HINTS = ["평균기온", "기온", "temperature", "temp"]
 KNOWN_PRODUCT_ORDER = [
@@ -169,9 +162,6 @@ def read_temperature_raw(file):
 
 @st.cache_data(ttl=600)
 def read_temperature_forecast(file):
-    """
-    월 단위 (날짜, 평균기온[, 추세분석]) → (연, 월, 예상기온, 추세기온)
-    """
     try:
         xls = pd.ExcelFile(file, engine="openpyxl")
         sheet = "기온예측" if "기온예측" in xls.sheet_names else xls.sheet_names[0]
@@ -183,7 +173,6 @@ def read_temperature_forecast(file):
     date_col = next((c for c in df.columns if c in ["날짜","일자","date","Date"]), df.columns[0])
     avg_col  = next((c for c in df.columns if ("평균기온" in c) or (str(c).lower() in ["temp","temperature","기온"])), None)
     trend_col = next((c for c in df.columns if ("추세" in c) or ("지수평활" in c)), None)
-
     if avg_col is None:
         raise ValueError("기온예측 파일에서 '평균기온' 또는 '기온' 열을 찾지 못했습니다.")
 
@@ -202,7 +191,6 @@ def read_temperature_forecast(file):
 def month_start(x): x = pd.to_datetime(x); return pd.Timestamp(x.year, x.month, 1)
 def month_range_inclusive(s, e): return pd.date_range(start=month_start(s), end=month_start(e), freq="MS")
 
-# --- Poly3
 def fit_poly3_and_predict(x_train, y_train, x_future):
     m = (~np.isnan(x_train)) & (~np.isnan(y_train))
     x_train, y_train = x_train[m], y_train[m]
@@ -235,12 +223,11 @@ def render_centered_table(df: pd.DataFrame, float1_cols=None, int_cols=None, ind
     st.markdown(show.to_html(index=index, classes="centered-table"), unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────
-# 예측 유형
 with st.sidebar:
     title_with_icon("🧭", "예측 유형", "h3", small=True)
     mode = st.radio("🔀 선택", ["공급량 예측", "판매량 예측(냉방용)"], index=0, label_visibility="visible")
 
-# =============== A) 공급량 예측 ==========================================
+# ========================= 공급량 예측 =========================
 if mode == "공급량 예측":
     with st.sidebar:
         title_with_icon("📥", "데이터 불러오기", "h3", small=True)
@@ -271,7 +258,6 @@ if mode == "공급량 예측":
                 up_fc = st.file_uploader("🌡️ 예상기온 업로드(xlsx) — (날짜, 평균기온[, 추세])", type=["xlsx"], key="up_fc_repo")
                 if up_fc is not None:
                     forecast_df = read_temperature_forecast(up_fc)
-
         else:
             up = st.file_uploader("📄 실적 엑셀 업로드(xlsx) — '데이터' 시트", type=["xlsx"])
             if up is not None:
@@ -298,31 +284,26 @@ if mode == "공급량 예측":
         default_products = [c for c in KNOWN_PRODUCT_ORDER if c in product_cols] or product_cols[:6]
         prods = st.multiselect("📦 상품(용도) 선택", product_cols, default=default_products)
 
+        # ======= 여기 수정: 사이드바에 columns 대신 '연/월 결합 셀렉트박스' =======
         title_with_icon("⚙️", "예측 설정", "h3", small=True)
-        year_range = list(range(2020, 2031))  # 2020~2030만
-        month_range = list(range(1, 13))
+        year_range = list(range(2020, 2031))  # 2020~2030
+        ym_list = [(y, m) for y in year_range for m in range(1,13)]
+        def ym_label(ym): y,m = ym; return f"{y}년 {m}월"
+
         last_year = int(df["연"].max())
+        start_default = (min(max(last_year, year_range[0]), year_range[-1]), 1)
+        end_default   = (min(max(last_year, year_range[0]), year_range[-1]), 12)
 
-        # 시작(연,월) 같은 줄 · 종료(연,월) 같은 줄
-        r1c1, r1c2 = st.columns(2)
-        with r1c1:
-            c1, c2 = st.columns([1,1])
-            with c1:
-                start_y = st.selectbox("🚀 예측 시작(연)", year_range,
-                                       index=year_range.index(min(max(last_year, year_range[0]), year_range[-1])))
-            with c2:
-                start_m = st.selectbox("🗓️ 예측 시작(월)", month_range, index=0)
+        start_ym = st.selectbox("🚀 예측 시작(연/월)", ym_list,
+                                index=ym_list.index(start_default), format_func=ym_label, key="startYM")
+        end_ym   = st.selectbox("🏁 예측 종료(연/월)", ym_list,
+                                index=ym_list.index(end_default), format_func=ym_label, key="endYM")
 
-        r2c1, r2c2 = st.columns(2)
-        with r2c1:
-            c3, c4 = st.columns([1,1])
-            with c3:
-                end_y = st.selectbox("🏁 예측 종료(연)", year_range,
-                                     index=year_range.index(min(max(last_year, year_range[0]), year_range[-1])))
-            with c4:
-                end_m = st.selectbox("🗓️ 예측 종료(월)", month_range, index=11)
+        start_y, start_m = start_ym
+        end_y, end_m = end_ym
 
         run_btn = st.button("🧮 예측 시작", type="primary")
+        # =============================================================
 
     if run_btn:
         base = df.dropna(subset=["날짜"]).sort_values("날짜").reset_index(drop=True)
@@ -335,18 +316,14 @@ if mode == "공급량 예측":
         fut_base = pd.DataFrame({"연": fut_idx.year.astype(int), "월": fut_idx.month.astype(int)})
 
         # 예측 파일 병합(예상기온/추세기온) + 누락월 보강
-        fut_base = fut_base.merge(forecast_df, on=["연","월"], how="left")  # '예상기온'[, '추세기온']
-
-        # 월평균 보강용(학습데이터)
+        fut_base = fut_base.merge(forecast_df, on=["연","월"], how="left")
         monthly_avg_temp = train_df.groupby("월")[temp_col].mean().rename("보강기온").reset_index()
         fut_base = fut_base.merge(monthly_avg_temp, on="월", how="left")
 
-        # Normal(예상기온) 보강
         miss_n = fut_base["예상기온"].isna()
         if miss_n.any():
             fut_base.loc[miss_n, "예상기온"] = fut_base.loc[miss_n, "보강기온"]
 
-        # 추세기온 보강(없으면 예상기온→보강기온 순서)
         if "추세기온" not in fut_base.columns:
             fut_base["추세기온"] = np.nan
         miss_t = fut_base["추세기온"].isna()
@@ -374,15 +351,12 @@ if mode == "공급량 예측":
     temp_col = mats["temp_col"]
     months = list(range(1,13))
 
-    # ── 예측 표(Normal/Best/Conservative는 유지) ─────────────────────────
+    # ── 시나리오 표(유지) ──
     title_with_icon("🌡️", "시나리오 Δ°C (평균기온 보정)", "h3", small=True)
     c1, c2, c3 = st.columns(3)
-    with c1:
-        d_norm = st.number_input("Normal Δ°C", value=0.0, step=0.5, format="%.1f", key="s_norm")
-    with c2:
-        d_best = st.number_input("Best Δ°C", value=-1.0, step=0.5, format="%.1f", key="s_best")
-    with c3:
-        d_cons = st.number_input("Conservative Δ°C", value=1.0, step=0.5, format="%.1f", key="s_cons")
+    with c1: d_norm = st.number_input("Normal Δ°C", value=0.0, step=0.5, format="%.1f", key="s_norm")
+    with c2: d_best = st.number_input("Best Δ°C", value=-1.0, step=0.5, format="%.1f", key="s_best")
+    with c3: d_cons = st.number_input("Conservative Δ°C", value=1.0, step=0.5, format="%.1f", key="s_cons")
 
     def _forecast_table_for_delta(delta: float) -> pd.DataFrame:
         x_future = (fut_base["예상기온"] + float(delta)).astype(float).values
@@ -409,26 +383,19 @@ if mode == "공급량 예측":
         tot["연"] = ""
         return pd.concat([pivot, pd.DataFrame([tot])], ignore_index=True)
 
-    st.markdown("### 🎯 Normal")
-    tbl_n = _forecast_table_for_delta(d_norm)
+    st.markdown("### 🎯 Normal"); tbl_n = _forecast_table_for_delta(d_norm)
     render_centered_table(tbl_n, float1_cols=["월평균기온"], int_cols=[c for c in tbl_n.columns if c not in ["연","월","월평균기온"]], index=False)
-
-    st.markdown("### 💎 Best")
-    tbl_b = _forecast_table_for_delta(d_best)
+    st.markdown("### 💎 Best");   tbl_b = _forecast_table_for_delta(d_best)
     render_centered_table(tbl_b, float1_cols=["월평균기온"], int_cols=[c for c in tbl_b.columns if c not in ["연","월","월평균기온"]], index=False)
-
-    st.markdown("### 🛡️ Conservative")
-    tbl_c = _forecast_table_for_delta(d_cons)
+    st.markdown("### 🛡️ Conservative"); tbl_c = _forecast_table_for_delta(d_cons)
     render_centered_table(tbl_c, float1_cols=["월평균기온"], int_cols=[c for c in tbl_c.columns if c not in ["연","월","월평균기온"]], index=False)
 
-    # ── 동적 월별 그래프(실적 + Normal + 추세분석) ─────────────────────────
+    # ── 동적 월별 그래프(실적 + Normal + 추세) ──
     title_with_icon("📈", "그래프 (실적 + 예측(Normal) + 추세분석)", "h3", small=True)
     years_all_for_plot = sorted([int(v) for v in base["연"].dropna().unique()])
     default_years_view = years_all_for_plot[-2:] if len(years_all_for_plot) >= 2 else years_all_for_plot
 
-    # 예측범위에서 기본 예측연도/추세연도 구성
-    fy0 = int(mats["start_ts"].year); fm0 = int(mats["start_ts"].month)
-    fy1 = int(mats["end_ts"].year);   fm1 = int(mats["end_ts"].month)
+    fy0 = int(mats["start_ts"].year); fy1 = int(mats["end_ts"].year)
     pred_years_default = list(range(fy0, fy1+1))
 
     col_y1, col_y2, col_y3 = st.columns(3)
@@ -443,77 +410,49 @@ if mode == "공급량 예측":
         pred_trend_years = st.multiselect("📈 추세분석연도", options=pred_years_default,
                                           default=pred_years_default, key="pred_trend_years")
 
-    # 제품별 그래프
     for prod in prods:
-        # 모델 적합(훈련용)
         y_train_prod = train_df[prod].astype(float).values
-        # Normal 예측
         x_future_norm = (fut_base["예상기온"] + float(d_norm)).astype(float).values
         y_future_norm, r2_train, model, poly = fit_poly3_and_predict(x_train, y_train_prod, x_future_norm)
-        Pn = fut_base[["연","월"]].copy()
-        Pn["pred"] = np.clip(np.rint(y_future_norm).astype(np.int64), a_min=0, a_max=None)
+        Pn = fut_base[["연","월"]].copy(); Pn["pred"] = np.clip(np.rint(y_future_norm).astype(np.int64), a_min=0, a_max=None)
 
-        # 추세 예측
         x_future_trend = fut_base["추세기온"].astype(float).values
         y_future_trend, _, _, _ = fit_poly3_and_predict(x_train, y_train_prod, x_future_trend)
-        Pt = fut_base[["연","월"]].copy()
-        Pt["pred"] = np.clip(np.rint(y_future_trend).astype(np.int64), a_min=0, a_max=None)
+        Pt = fut_base[["연","월"]].copy(); Pt["pred"] = np.clip(np.rint(y_future_trend).astype(np.int64), a_min=0, a_max=None)
 
-        # Plotly 동적 라인
         fig = go.Figure()
-        # 실적 연도
         for y in sorted([int(v) for v in years_view]):
             one = (base.loc[base["연"]==y, ["월", prod]].set_index("월")[prod]).reindex(months)
-            fig.add_trace(go.Scatter(x=months, y=one.values, mode="lines",
-                                     name=f"{y} 실적", line=dict(width=2)))
-        # 예측 Normal
+            fig.add_trace(go.Scatter(x=months, y=one.values, mode="lines", name=f"{y} 실적", line=dict(width=2)))
         for yy in pred_norm_years:
-            ser = []
-            for m in months:
-                row = Pn[(Pn["연"]==yy)&(Pn["월"]==m)]
-                ser.append(int(row.iloc[0]["pred"]) if len(row) else None)
-            fig.add_trace(go.Scatter(x=months, y=ser, mode="lines",
-                                     name=f"예측(Normal) {yy}",
-                                     line=dict(width=3, dash="dash")))
-        # 추세분석
+            ser = [int(Pn[(Pn["연"]==yy)&(Pn["월"]==m)]["pred"].iloc[0]) if len(Pn[(Pn["연"]==yy)&(Pn["월"]==m)]) else None for m in months]
+            fig.add_trace(go.Scatter(x=months, y=ser, mode="lines", name=f"예측(Normal) {yy}", line=dict(width=3, dash="dash")))
         for yy in pred_trend_years:
-            ser = []
-            for m in months:
-                row = Pt[(Pt["연"]==yy)&(Pt["월"]==m)]
-                ser.append(int(row.iloc[0]["pred"]) if len(row) else None)
-            fig.add_trace(go.Scatter(x=months, y=ser, mode="lines",
-                                     name=f"추세분석 {yy}",
-                                     line=dict(width=3, dash="dot")))
-        fig.update_layout(
-            height=420, margin=dict(l=40,r=20,t=60,b=50),
-            title=dict(text=f"{prod} — Poly-3 (Train R²={r2_train:.3f})", x=0.5),
-            xaxis=dict(tickmode="array", tickvals=months, ticktext=[f"{m}월" for m in months]),
-            yaxis=dict(title="공급량 (MJ)"),
-            legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5)
-        )
+            ser = [int(Pt[(Pt["연"]==yy)&(Pt["월"]==m)]["pred"].iloc[0]) if len(Pt[(Pt["연"]==yy)&(Pt["월"]==m)]) else None for m in months]
+            fig.add_trace(go.Scatter(x=months, y=ser, mode="lines", name=f"추세분석 {yy}", line=dict(width=3, dash="dot")))
+        fig.update_layout(height=420, margin=dict(l=40,r=20,t=60,b=60),
+                          title=dict(text=f"{prod} — Poly-3 (Train R²={r2_train:.3f})", x=0.5),
+                          xaxis=dict(tickmode="array", tickvals=months, ticktext=[f"{m}월" for m in months]),
+                          yaxis=dict(title="공급량 (MJ)"),
+                          legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5))
         st.plotly_chart(fig, use_container_width=True)
 
-        # ── 기온-공급량 상관(Train) — Matplotlib/Plotly 토글 ────────────────
+        # 상관 그래프 (토글)
         st.markdown("---")
-        col_toggle = st.toggle("🔎 상관 그래프 동적(Plotly) 보기", value=False, key=f"pltly_{prod}")
+        dyn = st.toggle("🔎 상관 그래프 동적(Plotly) 보기", value=False, key=f"pltly_{prod}")
 
         x_tr = train_df[temp_col].astype(float).values
         y_tr = y_train_prod
         xx = np.linspace(np.nanmin(x_tr)-1, np.nanmax(x_tr)+1, 250)
         yfit_line, r2_line, model_s, _ = fit_poly3_and_predict(x_tr, y_tr, xx)
         pred_train, _, _, _ = fit_poly3_and_predict(x_tr, y_tr, x_tr)
-        resid = y_tr - pred_train
-        s = np.nanstd(resid)
+        resid = y_tr - pred_train; s = np.nanstd(resid)
 
-        if not col_toggle:
-            # 정적(Matplotlib) — 선호 스타일
+        if not dyn:
             fig3, ax3 = plt.subplots(figsize=(9.6,5.6))
             ax3.scatter(x_tr, y_tr, alpha=0.8, s=46, label="학습 샘플")
-            # 음영(95% 신뢰구간)
             ax3.fill_between(xx, yfit_line-1.96*s, yfit_line+1.96*s, alpha=.18, label="95% 신뢰구간")
-            # 회귀선
             ax3.plot(xx, yfit_line, lw=3.4, label="Poly-3")
-            # 중앙값(주황)
             bins = np.linspace(np.nanmin(x_tr), np.nanmax(x_tr), 15)
             gb = pd.DataFrame({"bin": pd.cut(x_tr, bins), "y": y_tr}).groupby("bin")["y"].median().reset_index()
             gb["x"] = [b.mid for b in gb["bin"]]
@@ -526,37 +465,27 @@ if mode == "공급량 예측":
                      bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85))
             st.pyplot(fig3, clear_figure=True)
         else:
-            # 동적(Plotly) — 기존 톤 유지(파랑 점/선, 주황 중앙값, 95% 밴드)
             figp = go.Figure()
-            figp.add_trace(go.Scatter(x=x_tr, y=y_tr, mode="markers",
-                                      name="학습 샘플", marker=dict(size=7)))
-            # 95% band
+            figp.add_trace(go.Scatter(x=x_tr, y=y_tr, mode="markers", name="학습 샘플", marker=dict(size=7)))
             figp.add_trace(go.Scatter(x=np.concatenate([xx, xx[::-1]]),
                                       y=np.concatenate([yfit_line-1.96*s, (yfit_line+1.96*s)[::-1]]),
                                       fill='toself', fillcolor='rgba(31,119,180,0.20)',
                                       line=dict(width=0), name="95% 신뢰구간", hoverinfo="skip"))
-            # Regression line
-            figp.add_trace(go.Scatter(x=xx, y=yfit_line, mode="lines",
-                                      name="Poly-3", line=dict(width=4)))
-            # 중앙값
+            figp.add_trace(go.Scatter(x=xx, y=yfit_line, mode="lines", name="Poly-3", line=dict(width=4)))
             bins = np.linspace(np.nanmin(x_tr), np.nanmax(x_tr), 15)
             gb = pd.DataFrame({"bin": pd.cut(x_tr, bins), "y": y_tr}).groupby("bin")["y"].median().reset_index()
             gb["x"] = [b.mid for b in gb["bin"]]
             figp.add_trace(go.Scatter(x=gb["x"], y=gb["y"], mode="markers",
-                                      name="온도별 중앙값",
-                                      marker=dict(size=10, color="#ff7f0e", line=dict(width=0))))
-            figp.update_layout(
-                height=520, margin=dict(l=50,r=30,t=60,b=40),
-                title=f"{prod} — 기온·공급량 상관(Train, R²={r2_line:.3f})",
-                xaxis_title="기온 (℃)", yaxis_title="공급량 (MJ)",
-                legend=dict(orientation="h", yanchor="bottom", y=-0.22, xanchor="center", x=0.5)
-            )
+                                      name="온도별 중앙값", marker=dict(size=10, color="#ff7f0e")))
+            figp.update_layout(height=520, margin=dict(l=50,r=30,t=60,b=40),
+                               title=f"{prod} — 기온·공급량 상관(Train, R²={r2_line:.3f})",
+                               xaxis_title="기온 (℃)", yaxis_title="공급량 (MJ)",
+                               legend=dict(orientation="h", yanchor="bottom", y=-0.22, xanchor="center", x=0.5))
             st.plotly_chart(figp, use_container_width=True)
 
         st.caption("ℹ️ **95% 신뢰구간(근사 예측구간)**: 잔차 표준편차 *s* 기반으로 예측값 ± 1.96·s. 새 관측의 약 95%가 이 범위에 들어온다고 해석한다.")
 
-# =============== B) 판매량 예측(냉방용) =====================================
+# ========================= 판매량(냉방용) — 기존 유지 =========================
 else:
-    # 기존 판매량 섹션은 변경 없음 — 이전 파일 그대로 사용
     title_with_icon("🧊", "판매량 예측(냉방용) — 전월 16일 ~ 당월 15일 평균기온 기준", "h2")
-    st.info("판매량(냉방용) 섹션은 이전 버전과 동일하게 동작합니다. 필요 시 알려주면 이 섹션도 같은 방식으로 정렬/동적화해줄게.")
+    st.info("판매량(냉방용) 섹션은 이전 버전과 동일하게 동작합니다.")
