@@ -499,7 +499,20 @@ if mode == "공급량 예측":
     )
 
     # Excel (시나리오별 시트)
-    excel_buf = BytesIO()
+   excel_buf = BytesIO()
+try:
+    # 기본: openpyxl 사용 (대부분 환경에 설치되어 있음)
+    with pd.ExcelWriter(excel_buf, engine="openpyxl") as xw:
+        tbl_n.to_excel(xw, sheet_name="Normal(月별)", index=False)
+        sum_n.to_excel(xw, sheet_name="Normal(연도별)", index=False)
+        tbl_b.to_excel(xw, sheet_name="Best(月별)", index=False)
+        sum_b.to_excel(xw, sheet_name="Best(연도별)", index=False)
+        tbl_c.to_excel(xw, sheet_name="Cons(月별)", index=False)
+        sum_c.to_excel(xw, sheet_name="Cons(연도별)", index=False)
+        tbl_trd.to_excel(xw, sheet_name="추세(月별)", index=False)
+        sum_t.to_excel(xw, sheet_name="추세(연도별)", index=False)
+except ModuleNotFoundError:
+    # 드물게 openpyxl이 없을 때만 xlsxwriter로 폴백
     with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as xw:
         tbl_n.to_excel(xw, sheet_name="Normal(月별)", index=False)
         sum_n.to_excel(xw, sheet_name="Normal(연도별)", index=False)
@@ -509,13 +522,15 @@ if mode == "공급량 예측":
         sum_c.to_excel(xw, sheet_name="Cons(연도별)", index=False)
         tbl_trd.to_excel(xw, sheet_name="추세(月별)", index=False)
         sum_t.to_excel(xw, sheet_name="추세(연도별)", index=False)
-    st.download_button(
-        "⬇️ 예측 결과 Excel 다운로드 (시나리오별 시트)",
-        data=excel_buf.getvalue(),
-        file_name="citygas_supply_forecast.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="dl_xlsx"
-    )
+
+st.download_button(
+    "⬇️ 예측 결과 Excel 다운로드 (시나리오별 시트)",
+    data=excel_buf.getvalue(),
+    file_name="citygas_supply_forecast.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    key="dl_xlsx"
+)
+
 
     # ─── 상단 그래프 (Plotly) ───
     title_with_icon("📈", "그래프 (실적 + 예측(Normal) + 추세분석)", "h3", small=True)
