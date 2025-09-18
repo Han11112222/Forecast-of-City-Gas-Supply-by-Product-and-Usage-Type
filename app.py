@@ -1,5 +1,4 @@
-# app.py — 도시가스 공급·판매 예측 (Poly-3 + Poly-4 비교) + 아이콘 강화판
-
+# app.py — 도시가스 공급·판매 예측 (Poly-3 + Poly-4 비교) + 아이콘 강화판 + 추세분석
 import os
 from pathlib import Path
 import warnings
@@ -166,7 +165,7 @@ def read_temperature_raw(file):
 
 @st.cache_data(ttl=600)
 def read_temperature_forecast(file):
-    # 월 단위 (날짜, 평균기온) → (연, 월, 예상기온)
+    """월 단위 예측파일에서 기본예상기온과 '추세' 열까지 인식 → (연,월,예상기온,추세기온)"""
     try:
         xls = pd.ExcelFile(file, engine="openpyxl")
         sheet = "기온예측" if "기온예측" in xls.sheet_names else xls.sheet_names[0]
@@ -174,15 +173,29 @@ def read_temperature_forecast(file):
     except Exception:
         df = pd.read_excel(file, engine="openpyxl")
     df.columns = [str(c).strip() for c in df.columns]
+
     date_col = next((c for c in df.columns if c in ["날짜","일자","date","Date"]), df.columns[0])
-    temp_col = next((c for c in df.columns if ("평균기온" in c) or (str(c).lower() in ["temp","temperature","기온"])), None)
-    if temp_col is None:
+
+    # 기본 예상기온
+    base_temp_col = next((c for c in df.columns if ("평균기온" in c) or (str(c).lower() in ["temp","temperature","기온"])), None)
+    if base_temp_col is None:
         raise ValueError("기온예측 파일에서 '평균기온' 또는 '기온' 열을 찾지 못했습니다.")
-    d = pd.DataFrame({"날짜": pd.to_datetime(df[date_col], errors="coerce"),
-                      "예상기온": pd.to_numeric(df[temp_col], errors="coerce")}).dropna()
-    d["연"] = d["날짜"].dt.year.astype(int)
-    d["월"] = d["날짜"].dt.month.astype(int)
-    return d[["연","월","예상기온"]]
+
+    # 추세 기온(있으면 사용)
+    trend_candidates = [c for c in df.columns if any(k in str(c).lower() for k in ["추세", "trend", "지수", "평활"])]
+    trend_temp_col = trend_candidates[0] if trend_candidates else None
+
+    out = pd.DataFrame({
+        "날짜": pd.to_datetime(df[date_col], errors="coerce"),
+        "예상기온": pd.to_numeric(df[base_temp_col], errors="coerce")
+    })
+    if trend_temp_col:
+        out["추세기온"] = pd.to_numeric(df[trend_temp_col], errors="coerce")
+    out = out.dropna(subset=["날짜"]).copy()
+    out["연"] = out["날짜"].dt.year.astype(int)
+    out["월"] = out["날짜"].dt.month.astype(int)
+    cols = ["연","월","예상기온"] + (["추세기온"] if "추세기온" in out.columns else [])
+    return out[cols].sort_values(["연","월"]).reset_index(drop=True)
 
 def month_start(x): x = pd.to_datetime(x); return pd.Timestamp(x.year, x.month, 1)
 def month_range_inclusive(s, e): return pd.date_range(start=month_start(s), end=month_start(e), freq="MS")
@@ -241,6 +254,14 @@ def render_centered_table(df: pd.DataFrame, float1_cols=None, int_cols=None, ind
             show[c] = pd.to_numeric(show[c], errors="coerce").round().astype("Int64").map(lambda x: "" if pd.isna(x) else f"{int(x):,}")
     st.markdown(show.to_html(index=index, classes="centered-table"), unsafe_allow_html=True)
 
+def plot_pred_by_year(ax, pred_df: pd.DataFrame, label_prefix: str):
+    """pred_df: ['연','월','pred']"""
+    months = list(range(1,13))
+    for y in sorted(pred_df["연"].dropna().unique()):
+        s = pred_df.loc[pred_df["연"]==y, ["월","pred"]].set_index("월")["pred"].reindex(months)
+        if s.notna().any():
+            ax.plot(months, s.values, linestyle="--", label=f"{label_prefix} {int(y)}")
+
 # ─────────────────────────────────────────────────────────────
 # 예측 유형
 with st.sidebar:
@@ -275,7 +296,7 @@ if mode == "공급량 예측":
                 st.success(f"🌡️ 예상기온 파일 사용: {fc_path.name}")
                 forecast_df = read_temperature_forecast(fc_path)
             else:
-                up_fc = st.file_uploader("🌡️ 예상기온 업로드(xlsx) — (날짜, 평균기온)", type=["xlsx"], key="up_fc_repo")
+                up_fc = st.file_uploader("🌡️ 예상기온 업로드(xlsx) — (날짜, 평균기온[, 추세])", type=["xlsx"], key="up_fc_repo")
                 if up_fc is not None:
                     forecast_df = read_temperature_forecast(up_fc)
 
@@ -283,7 +304,7 @@ if mode == "공급량 예측":
             up = st.file_uploader("📄 실적 엑셀 업로드(xlsx) — '데이터' 시트", type=["xlsx"])
             if up is not None:
                 df = read_excel_sheet(up, prefer_sheet="데이터")
-            up_fc = st.file_uploader("🌡️ 예상기온 엑셀 업로드(xlsx) — (날짜, 평균기온)", type=["xlsx"])
+            up_fc = st.file_uploader("🌡️ 예상기온 엑셀 업로드(xlsx) — (날짜, 평균기온[, 추세])", type=["xlsx"])
             if up_fc is not None:
                 forecast_df = read_temperature_forecast(up_fc)
 
@@ -329,13 +350,17 @@ if mode == "공급량 예측":
         fut_idx = month_range_inclusive(f_start, f_end)
         fut_base = pd.DataFrame({"연": fut_idx.year.astype(int), "월": fut_idx.month.astype(int)})
 
-        # 예측 파일의 월평균 기온 우선 사용 + 누락월 보강
-        fut_base = fut_base.merge(forecast_df, on=["연","월"], how="left")  # '예상기온'
+        # 예측 파일의 월평균 기온 우선 사용 + 누락월 보강 (추세기온 포함)
+        fut_base = fut_base.merge(forecast_df, on=["연","월"], how="left")  # '예상기온'[, '추세기온']
         monthly_avg_temp = train_df.groupby("월")[temp_col].mean().rename("보강기온").reset_index()
         miss = fut_base["예상기온"].isna()
         if miss.any():
             fut_base = fut_base.merge(monthly_avg_temp, on="월", how="left")
             fut_base.loc[miss, "예상기온"] = fut_base.loc[miss, "보강기온"]
+        if "추세기온" in fut_base.columns:
+            miss_t = fut_base["추세기온"].isna()
+            if miss_t.any():
+                fut_base["추세기온"] = fut_base["추세기온"].fillna(fut_base.get("보강기온", np.nan))
         fut_base = fut_base.drop(columns=[c for c in ["보강기온"] if c in fut_base.columns])
 
         x_train_base = train_df[temp_col].astype(float).values
@@ -365,8 +390,9 @@ if mode == "공급량 예측":
     with c3:
         d_cons = st.number_input("Conservative Δ°C", value=1.0, step=0.5, format="%.1f", key="s_cons")
 
-    def _forecast_table_for_delta(delta: float) -> pd.DataFrame:
-        x_future = (fut_base["예상기온"] + float(delta)).astype(float).values
+    def _forecast_table_for_temps(temp_series: pd.Series) -> pd.DataFrame:
+        """fut_base와 동일 인덱스의 온도 시퀀스(월평균)로 표 생성"""
+        x_future = temp_series.astype(float).values
         pred_rows = []
         for col in prods:
             y_train = train_df[col].astype(float).values
@@ -390,6 +416,9 @@ if mode == "공급량 예측":
         tot["연"] = ""
         return pd.concat([pivot, pd.DataFrame([tot])], ignore_index=True)
 
+    def _forecast_table_for_delta(delta: float) -> pd.DataFrame:
+        return _forecast_table_for_temps(fut_base["예상기온"] + float(delta))
+
     st.markdown("### 🎯 Normal")
     tbl_n = _forecast_table_for_delta(d_norm)
     render_centered_table(tbl_n, float1_cols=["월평균기온"], int_cols=[c for c in tbl_n.columns if c not in ["연","월","월평균기온"]], index=False)
@@ -401,6 +430,19 @@ if mode == "공급량 예측":
     st.markdown("### 🛡️ Conservative")
     tbl_c = _forecast_table_for_delta(d_cons)
     render_centered_table(tbl_c, float1_cols=["월평균기온"], int_cols=[c for c in tbl_c.columns if c not in ["연","월","월평균기온"]], index=False)
+
+    # ── 추세분석 표 (있을 때만 노출)
+    has_trend = "추세기온" in fut_base.columns and fut_base["추세기온"].notna().any()
+    if has_trend:
+        st.markdown("### 📈 추세분석")
+        tbl_t = _forecast_table_for_temps(fut_base["추세기온"])
+        render_centered_table(tbl_t, float1_cols=["월평균기온"], int_cols=[c for c in tbl_t.columns if c not in ["연","월","월평균기온"]], index=False)
+        st.download_button(
+            "⬇️ 추세분석 예측 CSV 다운로드",
+            data=tbl_t.to_csv(index=False).encode("utf-8-sig"),
+            file_name="citygas_supply_forecast_trend.csv",
+            mime="text/csv"
+        )
 
     def add_scenario(df, name):
         d = df.copy(); d.insert(0, "시나리오", name); return d
@@ -423,27 +465,22 @@ if mode == "공급량 예측":
                                 key="supply_years_view")
 
     x_future_norm = (fut_base["예상기온"] + float(d_norm)).astype(float).values
+    x_future_trend = fut_base["추세기온"].astype(float).values if has_trend else None
 
     for prod in prods:
         y_train_prod = train_df[prod].astype(float).values
-        y_future_norm, r2_train, model, poly = fit_poly3_and_predict(x_train, y_train_prod, x_future_norm)
+        # ── Normal 예측
+        y_future_norm, r2_train, model, _ = fit_poly3_and_predict(x_train, y_train_prod, x_future_norm)
+        Pn = fut_base[["연","월"]].copy()
+        Pn["pred"] = np.clip(np.rint(y_future_norm).astype(np.int64), a_min=0, a_max=None)
 
-        P = fut_base[["연","월"]].copy()
-        P["pred"] = np.clip(np.rint(y_future_norm).astype(np.int64), a_min=0, a_max=None)
-
-        fig = plt.figure(figsize=(9,3.6)); ax = plt.gca()
+        fig = plt.figure(figsize=(9,3.8)); ax = plt.gca()
+        # 실적 연도
         for y in sorted([int(v) for v in years_view]):
             s = (base.loc[base["연"]==y, ["월", prod]].set_index("월")[prod]).reindex(months)
             ax.plot(months, s.values, label=f"{y} 실적")
-        pred_vals = []
-        y, m = int(mats["start_ts"].year), int(mats["start_ts"].month)
-        P2 = P.copy(); P2["연"]=P2["연"].astype(int); P2["월"]=P2["월"].astype(int)
-        for _ in range(12):
-            row = P2[(P2["연"]==y)&(P2["월"]==m)]
-            pred_vals.append(row.iloc[0]["pred"] if len(row) else np.nan)
-            if m==12: y+=1; m=1
-            else: m+=1
-        ax.plot(months, pred_vals, linestyle="--", label="예측(Normal)")
+        # 예측(연도별 dashed) – Normal
+        plot_pred_by_year(ax, Pn, "예측(Normal)")
         ax.set_xlim(1,12); ax.set_xticks(months); ax.set_xticklabels([f"{mm}월" for mm in months])
         ax.set_xlabel("월"); ax.set_ylabel("공급량 (MJ)")
         ax.set_title(f"{prod} — Poly-3 (Train R²={r2_train:.3f})"); ax.legend(loc="best")
@@ -452,6 +489,7 @@ if mode == "공급량 예측":
                 color="#1f77b4", bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
         plt.tight_layout(); st.pyplot(fig, clear_figure=True)
 
+        # ── 산점도+근사 신뢰구간
         figc, axc = plt.subplots(figsize=(9,4.4))
         x_tr = train_df[temp_col].astype(float).values
         y_tr = y_train_prod
@@ -474,6 +512,23 @@ if mode == "공급량 예측":
                  fontsize=10, color="#1f77b4",
                  bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
         st.pyplot(figc)
+
+        # ── 추세분석 그래프 (옵션)
+        if has_trend:
+            y_future_tr, r2_t, model_t, _ = fit_poly3_and_predict(x_train, y_train_prod, x_future_trend)
+            Pt = fut_base[["연","월"]].copy()
+            Pt["pred"] = np.clip(np.rint(y_future_tr).astype(np.int64), a_min=0, a_max=None)
+
+            fig_t = plt.figure(figsize=(9,3.6)); ax_t = plt.gca()
+            for y in sorted([int(v) for v in years_view]):
+                s = (base.loc[base["연"]==y, ["월", prod]].set_index("월")[prod]).reindex(months)
+                ax_t.plot(months, s.values, label=f"{y} 실적")
+            plot_pred_by_year(ax_t, Pt, "추세분석 예측")
+            ax_t.set_xlim(1,12); ax_t.set_xticks(months); ax_t.set_xticklabels([f"{mm}월" for mm in months])
+            ax_t.set_xlabel("월"); ax_t.set_ylabel("공급량 (MJ)")
+            ax_t.set_title(f"{prod} — 추세분석 예측 (연도별)") ; ax_t.legend(loc="best")
+            plt.tight_layout(); st.pyplot(fig_t, clear_figure=True)
+
     st.caption("ℹ️ **95% 신뢰구간(근사 예측구간)**: 잔차 표준편차 *s* 기반으로 예측값 ± 1.96·s. 새 관측의 약 95% 포함.")
 
 # =============== B) 판매량 예측(냉방용) =====================================
@@ -592,9 +647,9 @@ else:
         f_end   = pd.Timestamp(year=int(end_y),   month=int(end_m),   day=1)
         if f_end < f_start: st.error("⛔ 예측 종료가 시작보다 빠릅니다."); st.stop()
 
-        months = month_range_inclusive(f_start, f_end)
+        months_rng = month_range_inclusive(f_start, f_end)
         rows = []
-        for m in months:
+        for m in months_rng:
             s = (m - pd.offsets.MonthBegin(1)) + pd.DateOffset(days=15)
             e = m + pd.DateOffset(days=14)
             mask = (temp_raw["일자"]>=s)&(temp_raw["일자"]<=e)
@@ -697,22 +752,14 @@ else:
         )
         base_plot["pred"] = np.clip(np.rint(y_pred_norm).astype(np.int64), 0, None)
 
-        months = list(range(1,13))
+        months_axis = list(range(1,13))
         fig2, ax2 = plt.subplots(figsize=(10,4.2))
         for y in years_view:
             one = sales_df[sales_df["연"]==y][["월","판매량"]].dropna()
             if not one.empty:
                 ax2.plot(one["월"], one["판매량"], label=f"{y} 실적", alpha=0.95)
-        pred_vals = []
-        y, m = int(sm["f_start"].year), int(sm["f_start"].month)
-        P2 = base_plot[["연","월","pred"]].astype(int)
-        for _ in range(12):
-            row = P2[(P2["연"]==y)&(P2["월"]==m)]
-            pred_vals.append(row.iloc[0]["pred"] if len(row) else np.nan)
-            if m==12: y+=1; m=1
-            else: m+=1
-        ax2.plot(months, pred_vals, "--", lw=2.5, label="예측(Normal)")
-        ax2.set_xlim(1,12); ax2.set_xticks(months); ax2.set_xticklabels([f"{mm}월" for mm in months])
+        plot_pred_by_year(ax2, base_plot[["연","월","pred"]], "예측(Normal)")
+        ax2.set_xlim(1,12); ax2.set_xticks(months_axis); ax2.set_xticklabels([f"{mm}월" for mm in months_axis])
         ax2.set_xlabel("월"); ax2.set_ylabel("판매량 (MJ)")
         ax2.set_title(f"냉방용 — Poly-3 (Train R²={r2_line:.3f})")
         ax2.legend(loc="best"); ax2.grid(alpha=0.25)
@@ -812,22 +859,14 @@ else:
         )
         base_plot4["pred"] = np.clip(np.rint(y_pred_norm4).astype(np.int64), 0, None)
 
-        months = list(range(1,13))
+        months_axis = list(range(1,13))
         fig24, ax24 = plt.subplots(figsize=(10,4.2))
         for yv in years_view4:
             one = sales_df[sales_df["연"]==yv][["월","판매량"]].dropna()
             if not one.empty:
                 ax24.plot(one["월"], one["판매량"], label=f"{yv} 실적", alpha=0.95)
-        pred_vals4 = []
-        yv, mv = int(sm["f_start"].year), int(sm["f_start"].month)
-        P24 = base_plot4[["연","월","pred"]].astype(int)
-        for _ in range(12):
-            row = P24[(P24["연"]==yv)&(P24["월"]==mv)]
-            pred_vals4.append(row.iloc[0]["pred"] if len(row) else np.nan)
-            if mv==12: yv+=1; mv=1
-            else: mv+=1
-        ax24.plot(months, pred_vals4, "--", lw=2.5, label="예측(Normal)")
-        ax24.set_xlim(1,12); ax24.set_xticks(months); ax24.set_xticklabels([f"{mm}월" for mm in months])
+        plot_pred_by_year(ax24, base_plot4[["연","월","pred"]], "예측(Normal)")
+        ax24.set_xlim(1,12); ax24.set_xticks(months_axis); ax24.set_xticklabels([f"{mm}월" for mm in months_axis])
         ax24.set_xlabel("월"); ax24.set_ylabel("판매량 (MJ)")
         ax24.set_title(f"냉방용 — Poly-4 (Train R²={r2_line4:.3f})")
         ax24.legend(loc="best"); ax24.grid(alpha=0.25)
