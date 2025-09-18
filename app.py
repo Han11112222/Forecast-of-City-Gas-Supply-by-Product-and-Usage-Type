@@ -1,4 +1,4 @@
-# app.py — 도시가스 공급·판매 예측 (Poly-3 + Poly-4 비교) + 아이콘 강화판 + 추세분석
+# app.py — 도시가스 공급·판매 예측 (Poly-3 + Poly-4 비교) + 아이콘 강화판 + 추세분석 보강
 import os
 from pathlib import Path
 import warnings
@@ -175,13 +175,11 @@ def read_temperature_forecast(file):
     df.columns = [str(c).strip() for c in df.columns]
 
     date_col = next((c for c in df.columns if c in ["날짜","일자","date","Date"]), df.columns[0])
-
-    # 기본 예상기온
     base_temp_col = next((c for c in df.columns if ("평균기온" in c) or (str(c).lower() in ["temp","temperature","기온"])), None)
     if base_temp_col is None:
         raise ValueError("기온예측 파일에서 '평균기온' 또는 '기온' 열을 찾지 못했습니다.")
 
-    # 추세 기온(있으면 사용)
+    # 추세 열 후보: 예) '추세분석(지수평활법)', '추세기온', 'trend'
     trend_candidates = [c for c in df.columns if any(k in str(c).lower() for k in ["추세", "trend", "지수", "평활"])]
     trend_temp_col = trend_candidates[0] if trend_candidates else None
 
@@ -350,18 +348,25 @@ if mode == "공급량 예측":
         fut_idx = month_range_inclusive(f_start, f_end)
         fut_base = pd.DataFrame({"연": fut_idx.year.astype(int), "월": fut_idx.month.astype(int)})
 
-        # 예측 파일의 월평균 기온 우선 사용 + 누락월 보강 (추세기온 포함)
-        fut_base = fut_base.merge(forecast_df, on=["연","월"], how="left")  # '예상기온'[, '추세기온']
+        # ── 예측 파일 merge + 안전 보강(추세 포함)
+        fut_base = fut_base.merge(forecast_df, on=["연","월"], how="left")   # '예상기온'[, '추세기온']
+        # 항상 월별 학습평균을 붙여 보강 기반 확보
         monthly_avg_temp = train_df.groupby("월")[temp_col].mean().rename("보강기온").reset_index()
+        fut_base = fut_base.merge(monthly_avg_temp, on="월", how="left")
+
+        # 1) 기본 예상기온 결측 → 보강기온
         miss = fut_base["예상기온"].isna()
         if miss.any():
-            fut_base = fut_base.merge(monthly_avg_temp, on="월", how="left")
             fut_base.loc[miss, "예상기온"] = fut_base.loc[miss, "보강기온"]
+
+        # 2) 추세기온 결측 → 예상기온 → 그래도 NaN이면 보강기온
         if "추세기온" in fut_base.columns:
-            miss_t = fut_base["추세기온"].isna()
-            if miss_t.any():
-                fut_base["추세기온"] = fut_base["추세기온"].fillna(fut_base.get("보강기온", np.nan))
-        fut_base = fut_base.drop(columns=[c for c in ["보강기온"] if c in fut_base.columns])
+            fut_base["추세기온"] = fut_base["추세기온"].fillna(fut_base["예상기온"])
+            still = fut_base["추세기온"].isna()
+            if still.any():
+                fut_base.loc[still, "추세기온"] = fut_base.loc[still, "보강기온"]
+
+        fut_base = fut_base.drop(columns=["보강기온"])
 
         x_train_base = train_df[temp_col].astype(float).values
 
@@ -391,7 +396,6 @@ if mode == "공급량 예측":
         d_cons = st.number_input("Conservative Δ°C", value=1.0, step=0.5, format="%.1f", key="s_cons")
 
     def _forecast_table_for_temps(temp_series: pd.Series) -> pd.DataFrame:
-        """fut_base와 동일 인덱스의 온도 시퀀스(월평균)로 표 생성"""
         x_future = temp_series.astype(float).values
         pred_rows = []
         for col in prods:
@@ -431,7 +435,7 @@ if mode == "공급량 예측":
     tbl_c = _forecast_table_for_delta(d_cons)
     render_centered_table(tbl_c, float1_cols=["월평균기온"], int_cols=[c for c in tbl_c.columns if c not in ["연","월","월평균기온"]], index=False)
 
-    # ── 추세분석 표 (있을 때만 노출)
+    # ── 추세분석 표 (있을 때만 노출: 2026~2028만 있어도 동작)
     has_trend = "추세기온" in fut_base.columns and fut_base["추세기온"].notna().any()
     if has_trend:
         st.markdown("### 📈 추세분석")
@@ -469,17 +473,15 @@ if mode == "공급량 예측":
 
     for prod in prods:
         y_train_prod = train_df[prod].astype(float).values
-        # ── Normal 예측
+        # ── Normal 예측(연도별 dashed)
         y_future_norm, r2_train, model, _ = fit_poly3_and_predict(x_train, y_train_prod, x_future_norm)
         Pn = fut_base[["연","월"]].copy()
         Pn["pred"] = np.clip(np.rint(y_future_norm).astype(np.int64), a_min=0, a_max=None)
 
         fig = plt.figure(figsize=(9,3.8)); ax = plt.gca()
-        # 실적 연도
         for y in sorted([int(v) for v in years_view]):
             s = (base.loc[base["연"]==y, ["월", prod]].set_index("월")[prod]).reindex(months)
             ax.plot(months, s.values, label=f"{y} 실적")
-        # 예측(연도별 dashed) – Normal
         plot_pred_by_year(ax, Pn, "예측(Normal)")
         ax.set_xlim(1,12); ax.set_xticks(months); ax.set_xticklabels([f"{mm}월" for mm in months])
         ax.set_xlabel("월"); ax.set_ylabel("공급량 (MJ)")
@@ -489,7 +491,7 @@ if mode == "공급량 예측":
                 color="#1f77b4", bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
         plt.tight_layout(); st.pyplot(fig, clear_figure=True)
 
-        # ── 산점도+근사 신뢰구간
+        # ── 산점도 + 근사 신뢰구간
         figc, axc = plt.subplots(figsize=(9,4.4))
         x_tr = train_df[temp_col].astype(float).values
         y_tr = y_train_prod
@@ -513,7 +515,7 @@ if mode == "공급량 예측":
                  bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
         st.pyplot(figc)
 
-        # ── 추세분석 그래프 (옵션)
+        # ── 추세분석 그래프(옵션, 연도별 dashed)
         if has_trend:
             y_future_tr, r2_t, model_t, _ = fit_poly3_and_predict(x_train, y_train_prod, x_future_trend)
             Pt = fut_base[["연","월"]].copy()
@@ -523,10 +525,10 @@ if mode == "공급량 예측":
             for y in sorted([int(v) for v in years_view]):
                 s = (base.loc[base["연"]==y, ["월", prod]].set_index("월")[prod]).reindex(months)
                 ax_t.plot(months, s.values, label=f"{y} 실적")
-            plot_pred_by_year(ax_t, Pt, "추세분석 예측")
+            plot_pred_by_year(ax_t, Pt, "추세분석")
             ax_t.set_xlim(1,12); ax_t.set_xticks(months); ax_t.set_xticklabels([f"{mm}월" for mm in months])
             ax_t.set_xlabel("월"); ax_t.set_ylabel("공급량 (MJ)")
-            ax_t.set_title(f"{prod} — 추세분석 예측 (연도별)") ; ax_t.legend(loc="best")
+            ax_t.set_title(f"{prod} — 추세분석 예측(연도별)") ; ax_t.legend(loc="best")
             plt.tight_layout(); st.pyplot(fig_t, clear_figure=True)
 
     st.caption("ℹ️ **95% 신뢰구간(근사 예측구간)**: 잔차 표준편차 *s* 기반으로 예측값 ± 1.96·s. 새 관측의 약 95% 포함.")
@@ -773,11 +775,11 @@ else:
         ax3.scatter(x_train, y_train, alpha=0.65, label="학습 샘플")
         xx = np.linspace(np.nanmin(x_train)-1, np.nanmax(x_train)+1, 200)
         yhat, _, model_s, _ = fit_poly3_and_predict(x_train, y_train, xx)
-        ax3.plot(xx, yhat, lw=2.6, color="#1f77b4", label="Poly-3")
+        ax3.plot(xx, yhat, lw=2.6, label="Poly-3")
         pred_train, _, _, _ = fit_poly3_and_predict(x_train, y_train, x_train)
         resid = y_train - pred_train
         s = np.nanstd(resid)
-        ax3.fill_between(xx, yhat-1.96*s, yhat+1.96*s, color="#1f77b4", alpha=0.14, label="95% 신뢰구간")
+        ax3.fill_between(xx, yhat-1.96*s, yhat+1.96*s, alpha=0.14, label="95% 신뢰구간")
         bins = np.linspace(np.nanmin(x_train), np.nanmax(x_train), 15)
         gb = pd.DataFrame({"bin": pd.cut(x_train, bins), "y": y_train}).groupby("bin")["y"].median().reset_index()
         gb["x"] = [b.mid for b in gb["bin"]]
@@ -787,7 +789,7 @@ else:
         xmin, xmax = ax3.get_xlim(); ymin, ymax = ax3.get_ylim()
         ax3.text(xmin + 0.02*(xmax-xmin), ymin + 0.06*(ymax-ymin),
                  f"Poly-3: {poly_eq_text(model_s)}",
-                 fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
+                 bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
         st.pyplot(fig3)
 
     # ───────────── Poly-4 ─────────────
