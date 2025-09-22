@@ -328,8 +328,7 @@ if mode == "공급량 예측":
 
         title_with_icon("🧰", "예측할 상품 선택", "h3", small=True)
         product_cols = guess_product_cols(df)
-        # ⬇️ 디폴트: 개별난방용·중앙난방용·취사용만
-        default_products = [c for c in ["개별난방용","중앙난방용","취사용"] if c in product_cols] or product_cols[:3]
+        default_products = [c for c in KNOWN_PRODUCT_ORDER if c in product_cols] or product_cols[:6]
         prods = st.multiselect("📦 상품(용도) 선택", product_cols, default=default_products)
 
         # =========== 예측 설정 (사이드바 맨 아래 / 연·월 가로 배치) ===========
@@ -383,8 +382,6 @@ if mode == "공급량 예측":
             default_pred_years=list(range(int(start_y), int(end_y)+1))
         )
         st.success("✅ 공급량 예측(베이스) 준비 완료! 아래에서 **시나리오 Δ°C**를 조절하세요.")
-        # ⬇️ 안내문 추가
-        st.caption("ℹ️ 예상기온은 **기온예측** 파일의 기온을 사용했어.")
 
     if "supply_materials" not in st.session_state:
         st.info("👈 좌측에서 설정 후 **예측 시작**을 눌러 실행하세요.")
@@ -876,7 +873,7 @@ else:
         ax3.plot(xx, yhat, lw=2.6, color="#1f77b4", label="Poly-3")
         pred_train, _, _, _ = fit_poly3_and_predict(x_train, y_train, x_train)
         resid = y_train - pred_train; s = np.nanstd(resid)
-        ax3.fill_between(xx, yhat-1.96*s, yhat+1.96*s, alpha=0.14, label="95% 신뢰구간")
+        ax3.fill_between(xx, yhat-1.96*s, yhat+1.96*s, color="#1f77b4", alpha=0.14, label="95% 신뢰구간")
         bins = np.linspace(np.nanmin(x_train), np.nanmax(x_train), 15)
         gb = pd.DataFrame({"bin": pd.cut(x_train, bins), "y": y_train}).groupby("bin")["y"].median().reset_index()
         gb["x"] = [b.mid for b in gb["bin"]]
