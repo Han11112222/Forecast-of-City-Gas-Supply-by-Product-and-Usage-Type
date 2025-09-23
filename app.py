@@ -2,6 +2,8 @@
 #  - A) 공급량 예측: 기존 기능 그대로 + 상단 그래프 Normal/Best/Conservative 토글, '기온추세분석' 용어 통일
 #  - B) 판매량 예측(냉방용): 기존 로직(전월16~당월15) Poly-3/4 비교 그대로
 #  - C) 공급량 추세분석 예측: (연도별 총합) OLS/CAGR/Holt/SES + ARIMA/SARIMA 추가, 동적 Plotly 차트
+#  - Fix: ARIMA/SARIMA 공란 방지(월별 실패 시 연도합 시계열에 직접 ARIMA 폴백)
+#  - Default: 추세분석 탭 '분석할 상품' → 개별난방용, 중앙난방용, 취사용
 
 import os
 from io import BytesIO
@@ -50,7 +52,7 @@ def title_with_icon(icon: str, text: str, level: str = "h1", small=False):
     st.markdown(f"<{level} class='{klass}'><span class='emoji'>{icon}</span><span>{text}</span></{level}>",
                 unsafe_allow_html=True)
 
-# 상단 타이틀(요청: Poly-3 문구 제거)
+# 상단 타이틀
 title_with_icon("📊", "도시가스 공급량·판매량 예측")
 st.caption("공급량: 기온↔공급량 3차 다항식 · 판매량(냉방용): (전월16~당월15) 평균기온 기반")
 
@@ -92,7 +94,7 @@ TEMP_HINTS = ["평균기온", "기온", "temperature", "temp"]
 KNOWN_PRODUCT_ORDER = [
     "개별난방용", "중앙난방용",
     "자가열전용", "일반용(2)", "업무난방용", "냉난방용",
-    "주한미군", "총공급량"
+    "주한미군", "취사용", "총공급량"
 ]
 
 def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
@@ -662,7 +664,7 @@ if mode == "공급량 예측":
 
     st.caption("ℹ️ **95% 신뢰구간**: 잔차 표준편차 기준 근사 예측구간으로, 새로운 관측이 약 95% 확률로 이 음영 안에 들어옵니다.")
 
-# =============== B) 판매량 예측(냉방용) — 기존 전체 로직 유지 ==================
+# =============== B) 판매량 예측(냉방용) ==================
 elif mode == "판매량 예측(냉방용)":
     title_with_icon("🧊", "판매량 예측(냉방용) — 전월 16일 ~ 당월 15일 평균기온 기준", "h2")
     st.write("🗂️ 냉방용 **판매 실적 엑셀**과 **기온 RAW(일별)**을 준비하세요.")
@@ -1043,7 +1045,7 @@ elif mode == "판매량 예측(냉방용)":
                   fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
         st.pyplot(fig34)
 
-# =============== C) 공급량 추세분석 예측 — (연도별 총합) ================
+# =============== C) 공급량 추세분석 예측 ================
 elif mode == "공급량 추세분석 예측":
     title_with_icon("📈", "공급량 추세분석 예측 (연도별 총합 · Normal)", "h2")
 
@@ -1076,13 +1078,9 @@ elif mode == "공급량 추세분석 예측":
 
         title_with_icon("🧰", "분석할 상품 선택", "h3", small=True)
         product_cols = guess_product_cols(df)
-
-        # ✅ 디폴트: 개별난방용, 중앙난방용, 취사용 (존재하는 것만 자동 선택)
-        desired_defaults = ["개별난방용", "중앙난방용", "취사용"]
-        defaults = [c for c in desired_defaults if c in product_cols]
+        defaults = [c for c in ["개별난방용", "중앙난방용", "취사용"] if c in product_cols]
         if not defaults:
-            defaults = ([c for c in KNOWN_PRODUCT_ORDER if c in product_cols][:3] or product_cols[:3])
-
+            defaults = [c for c in KNOWN_PRODUCT_ORDER if c in product_cols][:3] or product_cols[:3]
         prods = st.multiselect("📦 상품(용도) 선택", product_cols, default=defaults, key="trend_prods")
 
         title_with_icon("⚙️", "예측 연도", "h3", small=True)
@@ -1132,85 +1130,124 @@ elif mode == "공급량 추세분석 예측":
             b = beta*(l - prev_l) + (1-beta)*b
         return [l + (h+1)*b for h in range(target_len)]
 
-    # ====== 결측/비연속 처리 포함한 시계열 헬퍼 (블록 내부) ======
     def _monthly_series_for(prod: str) -> pd.Series:
-        """
-        선택한 상품의 월별 시계열을 '연속 월(MS)'로 강제하고 수치형으로 반환.
-        """
-        s = base[["연","월",prod]].dropna(subset=["연","월"])
+        s = base[["연","월",prod]].dropna()
         s["날짜"] = pd.to_datetime(s["연"].astype(int).astype(str) + "-" + s["월"].astype(int).astype(str) + "-01")
-        s = s.sort_values("날짜").set_index("날짜")[prod].astype(float)
-        s = s.asfreq("MS")  # 연속 월 강제 (빈 달 생성)
+        s = s.sort_values("날짜")
+        s = s.set_index("날짜")[prod].astype(float).asfreq("MS")
         return s
 
-    def _prepare_train_series(ts: pd.Series, years_sel: list[int]) -> pd.Series:
-        """
-        학습연도만 필터링 후 결측 제거:
-        1) 시간보간 → 2) ffill/bfill → 3) 0 대체. 최소 길이 확보.
-        """
-        train = ts[ts.index.year.isin(years_sel)]
-        if train.isna().any():
-            train = (train.interpolate(method="time", limit_direction="both")
-                          .fillna(method="ffill")
-                          .fillna(method="bfill")
-                          .fillna(0.0))
-        if len(train.dropna()) < 6:
-            return pd.Series(dtype=float)
-        return train.astype(float)
+    # 연속 월/연으로 보정하는 유틸
+    def _prepare_train_series(ts: pd.Series, train_years: list[int]) -> pd.Series:
+        ser = ts[ts.index.year.isin(train_years)].copy()
+        if ser.empty:
+            return ser
+        # 연속 월 강제 + 간단한 보간(앞/뒤 채움)
+        full_idx = pd.date_range(start=ser.index.min().to_period("M").to_timestamp(),
+                                 end=ser.index.max().to_period("M").to_timestamp(), freq="MS")
+        ser = ser.reindex(full_idx)
+        ser = ser.interpolate(limit_direction="both").fillna(method="ffill").fillna(method="bfill")
+        return ser
 
-    def _fore_arima_yearsum(prod: str, target_years: list[int]) -> dict:
-        if not _HAS_SM:
-            return {y: np.nan for y in target_years}
-        ts = _monthly_series_for(prod)
-        train = _prepare_train_series(ts, years_sel)
-        if train.empty:
-            return {y: np.nan for y in target_years}
-        candidates = [(1,1,0), (0,1,1), (1,1,1)]
-        best_mdl, best_aic = None, np.inf
-        for order in candidates:
+    def _yearly_series_for(prod: str) -> pd.Series:
+        """선택 상품의 연도합 시계열 (연속 연도로 보간)"""
+        y = base.groupby("연")[prod].sum(numeric_only=True)
+        y = y.sort_index().astype(float)
+        full_years = pd.Index(range(int(y.index.min()), int(y.index.max()) + 1), name="연")
+        y = y.reindex(full_years).interpolate(limit_direction="both").fillna(method="ffill").fillna(method="bfill").fillna(0.0)
+        return y
+
+    def _fit_arima_candidate(series: pd.Series, orders=[(1,1,0),(0,1,1),(1,1,1)]):
+        best, aic = None, np.inf
+        for od in orders:
             try:
-                mdl = ARIMA(train, order=order).fit()
-                if mdl.aic < best_aic:
-                    best_aic, best_mdl = mdl.aic, mdl
+                m = ARIMA(series, order=od).fit()
+                if m.aic < aic:
+                    best, aic = m, m.aic
             except Exception:
                 continue
-        if best_mdl is None:
-            return {y: np.nan for y in target_years}
-        last_train_year = int(train.index[-1].year)
-        steps = 12 * max(1, (max(target_years) - last_train_year))
-        f = best_mdl.forecast(steps=steps)
-        fut = f.copy()
-        fut.index = pd.date_range(start=train.index[-1] + pd.offsets.MonthBegin(1),
-                                  periods=len(fut), freq="MS")
-        df_year = fut.groupby(fut.index.year).sum()
-        return {y: float(df_year.get(y, np.nan)) for y in target_years}
+        return best
 
-    def _fore_sarima_yearsum(prod: str, target_years: list[int]) -> dict:
+    def _fore_arima_yearsum(prod: str, target_years: list[int]) -> dict:
+        """월별→연도합 ARIMA가 실패하면, 연도합 시계열에 직접 ARIMA로 폴백."""
         if not _HAS_SM:
             return {y: np.nan for y in target_years}
-        ts = _monthly_series_for(prod)
-        train = _prepare_train_series(ts, years_sel)
-        if train.empty:
-            return {y: np.nan for y in target_years}
+        out = {y: np.nan for y in target_years}
+
+        # 1) 월별 기반
         try:
-            mdl = SARIMAX(
-                train,
-                order=(1,1,1),
-                seasonal_order=(1,1,1,12),
-                enforce_stationarity=False,
-                enforce_invertibility=False,
-            ).fit(disp=False)
+            ts_m = _monthly_series_for(prod)
+            train_m = _prepare_train_series(ts_m, years_sel)
+            if not train_m.empty:
+                last_year = int(train_m.index[-1].year)
+                steps = 12 * max(1, (max(target_years) - last_year))
+                mdl = _fit_arima_candidate(train_m)
+                if mdl is not None:
+                    f = mdl.forecast(steps=steps)
+                    fut = f.copy()
+                    fut.index = pd.date_range(start=train_m.index[-1] + pd.offsets.MonthBegin(1), periods=len(fut), freq="MS")
+                    df_year = fut.groupby(fut.index.year).sum()
+                    for y in target_years:
+                        if y in df_year.index:
+                            out[y] = float(df_year.loc[y])
         except Exception:
+            pass
+
+        # 2) 폴백: 연도합 시계열 직접 ARIMA
+        if all(np.isnan(list(out.values()))):
+            try:
+                ys = _yearly_series_for(prod)
+                ys_train = ys[ys.index.isin(years_sel)]
+                if len(ys_train) >= 3:
+                    mdl = _fit_arima_candidate(ys_train)
+                    if mdl is not None:
+                        f = mdl.forecast(steps=len(target_years))
+                        start_y = int(ys_train.index.max()) + 1
+                        idx = pd.Index(range(start_y, start_y + len(f)), name="연")
+                        f.index = idx
+                        for y in target_years:
+                            if y in f.index:
+                                out[y] = float(f.loc[y])
+            except Exception:
+                pass
+        return out
+
+    def _fore_sarima_yearsum(prod: str, target_years: list[int]) -> dict:
+        """월별 SARIMA 기본. 실패 시 ARIMA 폴백(연도합 직접)."""
+        if not _HAS_SM:
             return {y: np.nan for y in target_years}
-        last_train_year = int(train.index[-1].year)
-        steps = 12 * max(1, (max(target_years) - last_train_year))
-        f = mdl.forecast(steps=steps)
-        fut = f.copy()
-        fut.index = pd.date_range(start=train.index[-1] + pd.offsets.MonthBegin(1),
-                                  periods=len(fut), freq="MS")
-        df_year = fut.groupby(fut.index.year).sum()
-        return {y: float(df_year.get(y, np.nan)) for y in target_years}
-    # =========================================================
+        out = {y: np.nan for y in target_years}
+
+        # 1) 월별 SARIMA
+        try:
+            ts = _monthly_series_for(prod)
+            train = _prepare_train_series(ts, years_sel)
+            if not train.empty:
+                last_year = int(train.index[-1].year)
+                steps = 12 * max(1, (max(target_years) - last_year))
+                mdl = SARIMAX(
+                    train, order=(1,1,1), seasonal_order=(1,1,1,12),
+                    enforce_stationarity=False, enforce_invertibility=False
+                ).fit(disp=False)
+                f = mdl.forecast(steps=steps)
+                fut = f.copy()
+                fut.index = pd.date_range(start=train.index[-1] + pd.offsets.MonthBegin(1),
+                                          periods=len(fut), freq="MS")
+                df_year = fut.groupby(fut.index.year).sum()
+                for y in target_years:
+                    if y in df_year.index:
+                        out[y] = float(df_year.loc[y])
+        except Exception:
+            pass
+
+        # 2) 폴백: 연도합 ARIMA
+        if all(np.isnan(list(out.values()))):
+            return _fore_arima_yearsum(prod, target_years)
+        return out
+
+    # 상태 안내(옵션)
+    if not _HAS_SM:
+        st.info("🔧 ARIMA/SARIMA는 statsmodels 미설치 환경에선 계산되지 않습니다.")
 
     # 화면: 상품별 카드
     for prod in prods:
@@ -1240,11 +1277,15 @@ elif mode == "공급량 추세분석 예측":
         df_tbl = pd.DataFrame({"연": years_pred})
         for k in methods_selected:
             if k in pred_map:
-                df_tbl[k] = [int(max(0, round(pred_map[k].get(y, np.nan)))) if not np.isnan(pred_map[k].get(y, np.nan)) else "" for y in years_pred]
+                vals_k = []
+                for y in years_pred:
+                    v = pred_map[k].get(y, np.nan)
+                    vals_k.append(int(max(0, round(v))) if v==v else "")
+                df_tbl[k] = vals_k
         st.markdown(f"### {prod} — 연도별 총합 예측표 (Normal)")
         render_centered_table(df_tbl, int_cols=[c for c in df_tbl.columns if c!="연"], index=False)
 
-        # 그래프 ①: 연도별 총합(실적 라인 + 예측 포인트)
+        # 그래프 ①
         if go is None:
             fig, ax = plt.subplots(figsize=(10,4.2))
             yd = yearly_all[["연", prod]].dropna().sort_values("연")
@@ -1289,7 +1330,7 @@ elif mode == "공급량 추세분석 예측":
             )
             st.plotly_chart(fig, use_container_width=True)
 
-        # 그래프 ②: 방법별 표시 토글(동적)
+        # 그래프 ②: 방법별 표시 토글
         if go is not None:
             with st.expander(f"🔀 {prod} 방법별 표시 토글(동적)"):
                 toggles = {}
@@ -1301,7 +1342,7 @@ elif mode == "공급량 추세분석 예측":
                 yd = yearly_all[["연", prod]].dropna().sort_values("연")
                 fig2.add_trace(go.Scatter(x=yd["연"], y=yd[prod], mode="lines+markers", name="실적"))
                 for name in methods_selected:
-                    if not toggles.get(name, True): 
+                    if not toggles.get(name, True):
                         continue
                     if name in pred_map:
                         xs = years_pred
