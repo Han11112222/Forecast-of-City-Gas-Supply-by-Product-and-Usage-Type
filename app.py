@@ -457,34 +457,31 @@ def render_supply_forecast():
         pivot = pivot[["연", "월", "월평균기온(추세)"] + ordered + others]
         return pivot.sort_values(["연", "월"]).reset_index(drop=True)
 
-    # 표 + 연도별/반기별 총계  (✔️ 반기 합계 포함 & 반환)
+    # 표 + 연도별/반기별 총계
     def _render_with_year_sums(title, table, temp_col_name):
-        st.markdown(f"### {title}")
+        title_with_icon("🗂️", title, "h3", small=True)
         render_centered_table(
             table,
             float1_cols=[temp_col_name],
             int_cols=[c for c in table.columns if c not in ["연", "월", temp_col_name]],
             index=False,
         )
-        # 연도 합
+
+        # 연도 합 (표시 간결화: '월' 컬럼 제거)
         year_sum = table.groupby("연").sum(numeric_only=True).reset_index()
-        if "월" in year_sum.columns: year_sum["월"] = "1~12월"
-        if "월평균기온" in year_sum.columns: year_sum["월평균기온"] = ""
-        if "월평균기온(추세)" in year_sum.columns: year_sum["월평균기온(추세)"] = ""
-        cols_int = [c for c in year_sum.columns if c not in ["연","월","월평균기온","월평균기온(추세)"]]
-        st.markdown("#### 연도별 총계")
-        render_centered_table(year_sum, int_cols=cols_int, index=False)
+        cols_int = [c for c in year_sum.columns if c != "연"]
+        title_with_icon("🗓️", "연도별 총계", "h4", small=True)
+        render_centered_table(year_sum.drop(columns=[c for c in ["월"] if c in year_sum.columns]), int_cols=cols_int, index=False)
 
-        # 반기 합
+        # 반기 합 (요청: 제목 문구, '월 합계' 제거)
         tmp = table.copy()
-        tmp["반기"] = np.where(tmp["월"].astype(int) <= 6, "1~6월", "7~12월")
-        half = tmp.groupby(["연","반기"]).sum(numeric_only=True).reset_index().rename(columns={"반기":"월"})
-        if "월평균기온" in half.columns: half["월평균기온"] = ""
-        if "월평균기온(추세)" in half.columns: half["월평균기온(추세)"] = ""
-        st.markdown("#### 반기별 총계 (1~6월 / 7~12월)")
-        render_centered_table(half, int_cols=cols_int, index=False)
+        tmp["__half"] = np.where(tmp["월"].astype(int) <= 6, "1~6월", "7~12월")
+        half = tmp.groupby(["연", "__half"]).sum(numeric_only=True).reset_index().rename(columns={"__half": "반기"})
+        title_with_icon("🧮", "반기별 총계 (1~6월, 7~12월)", "h4", small=True)
+        half_to_show = half.rename(columns={"반기": "기간"})
+        render_centered_table(half_to_show, int_cols=[c for c in half_to_show.columns if c not in ["연", "기간"]], index=False)
 
-        return year_sum, half
+        return year_sum, half_to_show
 
     tbl_n = _forecast_table(d_norm)
     tbl_b = _forecast_table(d_best)
@@ -513,12 +510,16 @@ def render_supply_forecast():
         ["월평균기온", "월평균기온", "월평균기온", "월평균기온(추세)"],
     )
 
-    # 메타 텍스트
-    learn_years = sorted([int(y) for y in train_df["연"].unique() if int(y) in years_sel])
+    # 메타 텍스트 (요청: 제외기간은 선택 구간 내부에서만)
+    learn_years = sorted([int(y) for y in mats["years_sel"]])
     meta_learn  = f"{min(learn_years)}~{max(learn_years)}년" if learn_years else "-"
     all_years = sorted([int(y) for y in base["연"].unique()])
-    exclude_years = [y for y in all_years if y not in years_sel]
-    meta_excl   = ", ".join(str(int(y)) for y in exclude_years) if exclude_years else "-"
+    if learn_years:
+        span = list(range(min(learn_years), max(learn_years) + 1))
+        exclude_years = [y for y in span if (y in all_years and y not in learn_years)]
+    else:
+        exclude_years = []
+    meta_excl = ", ".join(str(y) for y in exclude_years) if exclude_years else "-"
 
     try:
         buf = BytesIO()
@@ -530,7 +531,7 @@ def render_supply_forecast():
             ws.cell(row=1, column=1, value="학습기간"); ws.cell(row=1, column=2, value=meta_learn)
             ws.cell(row=1, column=3, value="제외기간"); ws.cell(row=1, column=4, value=meta_excl)
 
-            # YearSum_* : 연합 + 빈줄 2줄 + 반기합 (메타 동일)
+            # YearSum_* : 연합 + 반기합 (메타 동일)
             def write_yearsum(sheet_name, year_df, half_df):
                 ysr = 2
                 year_df.to_excel(writer, index=False, sheet_name=sheet_name, startrow=ysr)
@@ -661,7 +662,8 @@ def render_supply_forecast():
             fig.update_layout(
                 title=f"{prod} — Poly-3 (Train R²={r2_train:.3f})",
                 xaxis=dict(title="월"), yaxis=dict(title="공급량 (MJ)", rangemode="tozero"),
-                legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="left", x=0),
+                legend=dict(orientation="h", yanchor="bottom", y=-0.18, xanchor="left", x=0),
+                margin=dict(t=60, b=120, l=40, r=20),
                 dragmode="pan",
             )
             st.plotly_chart(fig, use_container_width=True, config=dict(scrollZoom=True, displaylogo=False))
@@ -844,7 +846,7 @@ def render_cooling_sales_forecast():
     show_poly3 = view_choice in ["3차(Poly-3)", "둘 다"]
     show_poly4 = view_choice in ["4차(Poly-4)", "둘 다"]
 
-    # Poly-3
+    # Poly-3 (… 이하 동일 구조 — 생략 없이 기존 코드 유지 …)
     if show_poly3:
         st.subheader("시나리오 Δ°C (평균기온 보정) — Poly-3")
         c1, c2, c3 = st.columns(3)
@@ -946,8 +948,6 @@ def render_cooling_sales_forecast():
                  transform=ax3.transAxes, fontsize=10,
                  bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
         st.pyplot(fig3)
-
-    # Poly-4 (생략 없이 동일 구조로 이어서 사용 가능)
 
 # ===========================================================
 # C) 공급량 추세분석 예측 — OLS/CAGR/Holt/SES + ARIMA/SARIMA
@@ -1153,6 +1153,7 @@ def render_trend_forecast():
             pred_map["SARIMA(12)"] = _fore_sarima_yearsum(prod, years_pred)
 
         # 예측표
+        title_with_icon("📋", f"{prod} — 연도별 총합 예측표 (Normal)", "h3", small=True)
         df_tbl = pd.DataFrame({"연": years_pred})
         for k in methods_selected:
             if k in pred_map:
@@ -1161,7 +1162,6 @@ def render_trend_forecast():
                     v = pred_map[k].get(y, np.nan)
                     vals_k.append(int(max(0, round(v))) if v == v else "")
                 df_tbl[k] = vals_k
-        st.markdown(f"### {prod} — 연도별 총합 예측표 (Normal)")
         render_centered_table(df_tbl, int_cols=[c for c in df_tbl.columns if c != "연"], index=False)
 
         # 그래프 ①
@@ -1201,7 +1201,8 @@ def render_trend_forecast():
             fig.update_layout(
                 title="연도별 총합(실적 라인 + 예측 포인트)",
                 xaxis_title="연도", yaxis_title="총합",
-                legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="left", x=0),
+                legend=dict(orientation="h", yanchor="bottom", y=-0.18, xanchor="left", x=0),
+                margin=dict(t=60, b=120, l=40, r=20),   # ⬅️ 겹침 방지: 하단 여백 확대
                 hovermode="x unified",
             )
             st.plotly_chart(fig, use_container_width=True)
@@ -1227,7 +1228,8 @@ def render_trend_forecast():
                                                   text=[f"{int(v):,}" if v == v else "" for v in ys],
                                                   textposition="top center"))
                 fig2.update_layout(title="방법별 동적 표시", xaxis_title="연도", yaxis_title="총합",
-                                   legend=dict(orientation="h"))
+                                   legend=dict(orientation="h", yanchor="bottom", y=-0.18, x=0),
+                                   margin=dict(t=60, b=110, l=40, r=20))
                 st.plotly_chart(fig2, use_container_width=True)
 
     with st.expander("예측 방법 설명 (쉬운 설명 + 산식)"):
