@@ -469,30 +469,29 @@ def render_supply_forecast():
             index=False,
         )
 
-        # 연도 합: '월' 제거 + '월평균기온' 공란 처리
+        # 연도 합: '월' 제거 + '월평균기온' 열 자체 제거
         year_sum = table.groupby("연").sum(numeric_only=True).reset_index()
-        year_sum_show = year_sum.drop(columns=[c for c in ["월"] if c in year_sum.columns])
-        if temp_col_name in year_sum_show.columns:
-            year_sum_show[temp_col_name] = ""  # ← 공란
-        cols_int = [c for c in year_sum_show.columns if c not in ["연", temp_col_name]]
+        # ▶ 변경: 월/월평균기온 둘 다 삭제
+        year_sum_show = year_sum.drop(columns=[c for c in ["월", temp_col_name] if c in year_sum.columns])
+        cols_int = [c for c in year_sum_show.columns if c not in ["연"]]  # ▶ 변경
+
         title_with_icon("🗓️", "연도별 총계", "h4", small=True)
         render_centered_table(year_sum_show, int_cols=cols_int, index=False)
 
-        # 반기 합: '월' 제거 + '월평균기온' 공란 처리
+        # 반기 합: '월' 제거 + '월평균기온' 열 자체 제거
         tmp = table.copy()
         tmp["__half"] = np.where(tmp["월"].astype(int) <= 6, "1~6월", "7~12월")
         half = tmp.groupby(["연", "__half"]).sum(numeric_only=True).reset_index().rename(columns={"__half": "반기"})
-        half_to_show = half.rename(columns={"반기": "기간"}).drop(columns=[c for c in ["월"] if c in half.columns])
-        if temp_col_name in half_to_show.columns:
-            half_to_show[temp_col_name] = ""  # ← 공란
+        # ▶ 변경: 월/월평균기온 둘 다 삭제
+        half_to_show = half.rename(columns={"반기": "기간"}).drop(columns=[c for c in ["월", temp_col_name] if c in half.columns])
         title_with_icon("🧮", "반기별 총계 (1~6월, 7~12월)", "h4", small=True)
         render_centered_table(
             half_to_show,
-            int_cols=[c for c in half_to_show.columns if c not in ["연", "기간", temp_col_name]],
+            int_cols=[c for c in half_to_show.columns if c not in ["연", "기간"]],  # ▶ 변경
             index=False,
         )
 
-        # 다운로드용 반환도 공란 반영본 사용
+        # 다운로드용 반환도 동일(기온 열 제거본)
         return year_sum_show, half_to_show
 
     tbl_n = _forecast_table(d_norm)
