@@ -260,13 +260,15 @@ def fit_poly4_and_predict(x_train, y_train, x_future):
     y_future = model.predict(poly.transform(x_future))
     return y_future, r2, model, poly
 
-def poly_eq_text(model):
+# ▼ 수정: Poly-3 방정식 표기(소수 4자리, 지수표기 금지)
+def poly_eq_text(model, decimals: int = 4):
     c = model.coef_
     c1 = c[0] if len(c) > 0 else 0.0
     c2 = c[1] if len(c) > 1 else 0.0
     c3 = c[2] if len(c) > 2 else 0.0
     d = model.intercept_
-    return f"y = {c3:+.5e}x³ {c2:+.5e}x² {c1:+.5e}x {d:+.5e}"
+    fmt = lambda v: f"{v:+,.{decimals}f}"
+    return f"y = {fmt(c3)}x³ {fmt(c2)}x² {fmt(c1)}x {fmt(d)}"
 
 def poly_eq_text4(model):
     c = model.coef_
@@ -467,21 +469,31 @@ def render_supply_forecast():
             index=False,
         )
 
-        # 연도 합 (표시 간결화: '월' 컬럼 제거)
+        # 연도 합: '월' 제거 + '월평균기온' 공란 처리
         year_sum = table.groupby("연").sum(numeric_only=True).reset_index()
-        cols_int = [c for c in year_sum.columns if c != "연"]
+        year_sum_show = year_sum.drop(columns=[c for c in ["월"] if c in year_sum.columns])
+        if temp_col_name in year_sum_show.columns:
+            year_sum_show[temp_col_name] = ""  # ← 공란
+        cols_int = [c for c in year_sum_show.columns if c not in ["연", temp_col_name]]
         title_with_icon("🗓️", "연도별 총계", "h4", small=True)
-        render_centered_table(year_sum.drop(columns=[c for c in ["월"] if c in year_sum.columns]), int_cols=cols_int, index=False)
+        render_centered_table(year_sum_show, int_cols=cols_int, index=False)
 
-        # 반기 합 (요청: 제목 문구, '월 합계' 제거)
+        # 반기 합: '월' 제거 + '월평균기온' 공란 처리
         tmp = table.copy()
         tmp["__half"] = np.where(tmp["월"].astype(int) <= 6, "1~6월", "7~12월")
         half = tmp.groupby(["연", "__half"]).sum(numeric_only=True).reset_index().rename(columns={"__half": "반기"})
+        half_to_show = half.rename(columns={"반기": "기간"}).drop(columns=[c for c in ["월"] if c in half.columns])
+        if temp_col_name in half_to_show.columns:
+            half_to_show[temp_col_name] = ""  # ← 공란
         title_with_icon("🧮", "반기별 총계 (1~6월, 7~12월)", "h4", small=True)
-        half_to_show = half.rename(columns={"반기": "기간"})
-        render_centered_table(half_to_show, int_cols=[c for c in half_to_show.columns if c not in ["연", "기간"]], index=False)
+        render_centered_table(
+            half_to_show,
+            int_cols=[c for c in half_to_show.columns if c not in ["연", "기간", temp_col_name]],
+            index=False,
+        )
 
-        return year_sum, half_to_show
+        # 다운로드용 반환도 공란 반영본 사용
+        return year_sum_show, half_to_show
 
     tbl_n = _forecast_table(d_norm)
     tbl_b = _forecast_table(d_best)
@@ -531,7 +543,7 @@ def render_supply_forecast():
             ws.cell(row=1, column=1, value="학습기간"); ws.cell(row=1, column=2, value=meta_learn)
             ws.cell(row=1, column=3, value="제외기간"); ws.cell(row=1, column=4, value=meta_excl)
 
-            # YearSum_* : 연합 + 반기합 (메타 동일)
+            # YearSum_* : 연합 + 반기합 (메타 동일, 표시는 위 로직 반영본 사용)
             def write_yearsum(sheet_name, year_df, half_df):
                 ysr = 2
                 year_df.to_excel(writer, index=False, sheet_name=sheet_name, startrow=ysr)
@@ -624,7 +636,6 @@ def render_supply_forecast():
         P_trend = fut_with_t[["연", "월", "T_trend"]].copy(); P_trend["pred"] = np.clip(np.rint(y_trd).astype(np.int64), 0, None)
 
         if go is None:
-            # (Matplotlib은 hover 미지원 — 기존 유지)
             fig = plt.figure(figsize=(9, 3.6)); ax = plt.gca()
             for y in sorted([int(v) for v in years_view]):
                 s = base.loc[base["연"] == y, ["월", prod]].set_index("월")[prod].reindex(months)
@@ -651,7 +662,6 @@ def render_supply_forecast():
             for y in sorted([int(v) for v in years_view]):
                 one = base[base["연"] == y][["월", prod]].dropna().sort_values("월")
                 t_one = actual_temp[actual_temp["연"] == y].sort_values("월")
-                # 월 기준으로 정렬/맞추기
                 one = one.merge(t_one[["월", "T_actual"]], on="월", how="left")
                 fig.add_trace(go.Scatter(
                     x=[f"{int(m)}월" for m in one["월"]],
@@ -895,7 +905,6 @@ def render_cooling_sales_forecast():
     show_poly3 = view_choice in ["3차(Poly-3)", "둘 다"]
     show_poly4 = view_choice in ["4차(Poly-4)", "둘 다"]
 
-    # Poly-3 (… 이하 동일 구조 — 생략 없이 기존 코드 유지 …)
     if show_poly3:
         st.subheader("시나리오 Δ°C (평균기온 보정) — Poly-3")
         c1, c2, c3 = st.columns(3)
