@@ -260,43 +260,22 @@ def fit_poly4_and_predict(x_train, y_train, x_future):
     y_future = model.predict(poly.transform(x_future))
     return y_future, r2, model, poly
 
-# ── 지수표기 없이 깔끔한 숫자 문자열(콤마 포함)
-def _fmt_nosci(x: float, precision: int = 6) -> str:
-    s = np.format_float_positional(abs(float(x)), precision=precision, trim='-')
-    if '.' in s:
-        ip, fp = s.split('.')
-        s = f"{int(ip):,}.{fp}"
-    else:
-        s = f"{int(s):,}"
-    return ('+' if x >= 0 else '-') + s
-
-def poly_eq_text(model, precision: int = 6) -> str:
+def poly_eq_text(model):
     c = model.coef_
     c1 = c[0] if len(c) > 0 else 0.0
     c2 = c[1] if len(c) > 1 else 0.0
     c3 = c[2] if len(c) > 2 else 0.0
     d = model.intercept_
-    return (
-        f"y = {_fmt_nosci(c3, precision)}x³ "
-        f"{_fmt_nosci(c2, precision)}x² "
-        f"{_fmt_nosci(c1, precision)}x "
-        f"{_fmt_nosci(d,  precision)}"
-    )
+    return f"y = {c3:+.5e}x³ {c2:+.5e}x² {c1:+.5e}x {d:+.5e}"
 
-def poly_eq_text4(model, precision: int = 6) -> str:
+def poly_eq_text4(model):
     c = model.coef_
     c1 = c[0] if len(c) > 0 else 0.0
     c2 = c[1] if len(c) > 1 else 0.0
     c3 = c[2] if len(c) > 2 else 0.0
     c4 = c[3] if len(c) > 3 else 0.0
     d = model.intercept_
-    return (
-        f"y = {_fmt_nosci(c4, precision)}x⁴ "
-        f"{_fmt_nosci(c3, precision)}x³ "
-        f"{_fmt_nosci(c2, precision)}x² "
-        f"{_fmt_nosci(c1, precision)}x "
-        f"{_fmt_nosci(d,  precision)}"
-    )
+    return f"y = {c4:+.5e}x⁴ {c3:+.5e}x³ {c2:+.5e}x² {c1:+.5e}x {d:+.5e}"
 
 def render_centered_table(df: pd.DataFrame, float1_cols=None, int_cols=None, index=False):
     float1_cols = float1_cols or []
@@ -397,7 +376,7 @@ def render_supply_forecast():
         fut_idx = month_range_inclusive(f_start, f_end)
         fut_base = pd.DataFrame({"연": fut_idx.year.astype(int), "월": fut_idx.month.astype(int)})
 
-        # ✔️ 단순 병합
+        # ✔️ 단순 병합 (버그 제거)
         fut_base = fut_base.merge(forecast_df, on=["연", "월"], how="left")
 
         monthly_avg_temp = train_df.groupby("월")[temp_col].mean().rename("월평균").reset_index()
@@ -478,7 +457,7 @@ def render_supply_forecast():
         pivot = pivot[["연", "월", "월평균기온(추세)"] + ordered + others]
         return pivot.sort_values(["연", "월"]).reset_index(drop=True)
 
-    # 표 + 연도별/반기별 총계(요청 반영)
+    # 표 + 연도별/반기별 총계
     def _render_with_year_sums(title, table, temp_col_name):
         title_with_icon("🗂️", title, "h3", small=True)
         render_centered_table(
@@ -488,13 +467,13 @@ def render_supply_forecast():
             index=False,
         )
 
-        # 연도 합(월 컬럼 제거)
+        # 연도 합 (표시 간결화: '월' 컬럼 제거)
         year_sum = table.groupby("연").sum(numeric_only=True).reset_index()
         cols_int = [c for c in year_sum.columns if c != "연"]
         title_with_icon("🗓️", "연도별 총계", "h4", small=True)
         render_centered_table(year_sum.drop(columns=[c for c in ["월"] if c in year_sum.columns]), int_cols=cols_int, index=False)
 
-        # 반기 합(제목/표시 형식 수정)
+        # 반기 합 (요청: 제목 문구, '월 합계' 제거)
         tmp = table.copy()
         tmp["__half"] = np.where(tmp["월"].astype(int) <= 6, "1~6월", "7~12월")
         half = tmp.groupby(["연", "__half"]).sum(numeric_only=True).reset_index().rename(columns={"__half": "반기"})
@@ -514,7 +493,7 @@ def render_supply_forecast():
     sum_c, half_c = _render_with_year_sums("🛡️ Conservative", tbl_c, "월평균기온")
     sum_t, half_t = _render_with_year_sums("📈 기온추세분석", tbl_trd, "월평균기온(추세)")
 
-    # 다운로드 (메타정보 + 반기합 포함)
+    # 다운로드 (✔️ 메타정보 + 반기합 포함)
     def _pack_for_download(df_list, names, temp_names):
         outs = []
         for df, nm, tnm in zip(df_list, names, temp_names):
@@ -531,7 +510,7 @@ def render_supply_forecast():
         ["월평균기온", "월평균기온", "월평균기온", "월평균기온(추세)"],
     )
 
-    # 메타 텍스트(제외기간: 선택 구간 내부만)
+    # 메타 텍스트 (요청: 제외기간은 선택 구간 내부에서만)
     learn_years = sorted([int(y) for y in mats["years_sel"]])
     meta_learn  = f"{min(learn_years)}~{max(learn_years)}년" if learn_years else "-"
     all_years = sorted([int(y) for y in base["연"].unique()])
@@ -575,6 +554,7 @@ def render_supply_forecast():
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     except Exception:
+        # CSV는 Forecast만 제공
         st.download_button(
             "⬇️ 예측 결과 CSV 다운로드 (Forecast만)",
             data=to_dl.to_csv(index=False).encode("utf-8-sig"),
@@ -620,18 +600,31 @@ def render_supply_forecast():
         back = train_df.groupby("월")[temp_col].mean().reindex(fut_base["월"]).values
         x_future_trend = np.where(np.isnan(x_future_trend), back, x_future_trend)
 
+    # 🔹 Plotly Hover에 월평균기온 넣기 위한 준비 테이블들
+    fut_with_t = fut_base.copy()
+    fut_with_t["T_norm"] = x_future_norm
+    fut_with_t["T_best"] = x_future_best
+    fut_with_t["T_cons"] = x_future_cons
+    fut_with_t["T_trend"] = x_future_trend
+
+    # 실적용: 해당 연도의 실제 월평균 기온
+    actual_temp = (
+        base.groupby(["연", "월"])[temp_col].mean().reset_index().rename(columns={temp_col: "T_actual"})
+    )
+
     for prod in prods:
         y_train_prod = train_df[prod].astype(float).values
         y_norm, r2_train, _, _ = fit_poly3_and_predict(x_train, y_train_prod, x_future_norm)
-        P_norm = fut_base[["연", "월"]].copy(); P_norm["pred"] = np.clip(np.rint(y_norm).astype(np.int64), 0, None)
+        P_norm = fut_with_t[["연", "월", "T_norm"]].copy(); P_norm["pred"] = np.clip(np.rint(y_norm).astype(np.int64), 0, None)
         y_best, _, _, _ = fit_poly3_and_predict(x_train, y_train_prod, x_future_best)
-        P_best = fut_base[["연", "월"]].copy(); P_best["pred"] = np.clip(np.rint(y_best).astype(np.int64), 0, None)
+        P_best = fut_with_t[["연", "월", "T_best"]].copy(); P_best["pred"] = np.clip(np.rint(y_best).astype(np.int64), 0, None)
         y_cons, _, _, _ = fit_poly3_and_predict(x_train, y_train_prod, x_future_cons)
-        P_cons = fut_base[["연", "월"]].copy(); P_cons["pred"] = np.clip(np.rint(y_cons).astype(np.int64), 0, None)
+        P_cons = fut_with_t[["연", "월", "T_cons"]].copy(); P_cons["pred"] = np.clip(np.rint(y_cons).astype(np.int64), 0, None)
         y_trd, _, _, _ = fit_poly3_and_predict(x_train, y_train_prod, x_future_trend)
-        P_trend = fut_base[["연", "월"]].copy(); P_trend["pred"] = np.clip(np.rint(y_trd).astype(np.int64), 0, None)
+        P_trend = fut_with_t[["연", "월", "T_trend"]].copy(); P_trend["pred"] = np.clip(np.rint(y_trd).astype(np.int64), 0, None)
 
         if go is None:
+            # (Matplotlib은 hover 미지원 — 기존 유지)
             fig = plt.figure(figsize=(9, 3.6)); ax = plt.gca()
             for y in sorted([int(v) for v in years_view]):
                 s = base.loc[base["연"] == y, ["월", prod]].set_index("월")[prod].reindex(months)
@@ -654,59 +647,70 @@ def render_supply_forecast():
             ax.legend(loc="best"); st.pyplot(fig, clear_figure=True)
         else:
             fig = go.Figure()
-            # 실적
+            # ── 실적 (hover에 실제 월평균기온)
             for y in sorted([int(v) for v in years_view]):
                 one = base[base["연"] == y][["월", prod]].dropna().sort_values("월")
+                t_one = actual_temp[actual_temp["연"] == y].sort_values("월")
+                # 월 기준으로 정렬/맞추기
+                one = one.merge(t_one[["월", "T_actual"]], on="월", how="left")
                 fig.add_trace(go.Scatter(
-                    x=[f"{int(m)}월" for m in one["월"]], y=one[prod],
-                    mode="lines+markers", name=f"{y} 실적",
-                    hovertemplate="%{x} %{y:,}"
+                    x=[f"{int(m)}월" for m in one["월"]],
+                    y=one[prod],
+                    customdata=np.round(one["T_actual"].values.astype(float), 2),
+                    mode="lines+markers",
+                    name=f"{y} 실적",
+                    hovertemplate="%{x} %{y:,}<br>월평균기온 %{customdata:.2f}℃"
                 ))
-            # 예측 (Normal/Best/Cons) — hover에 월평균기온 표시
+            # ── 예측(Normal)
             for y in years_pred:
                 row = P_norm[P_norm["연"] == int(y)].sort_values("월")
-                temps = (fut_base[fut_base["연"] == int(y)].sort_values("월")["예상기온"] + d_norm).values
                 fig.add_trace(go.Scatter(
-                    x=[f"{int(m)}월" for m in row["월"]], y=row["pred"],
-                    mode="lines", name=f"예측(Normal) {y}",
+                    x=[f"{int(m)}월" for m in row["월"]],
+                    y=row["pred"],
+                    customdata=np.round(row["T_norm"].values.astype(float), 2),
+                    mode="lines",
+                    name=f"예측(Normal) {y}",
                     line=dict(dash="dash"),
-                    customdata=np.round(temps, 1),
-                    hovertemplate="%{x} %{y:,}<br>월평균기온: %{customdata:.1f}℃"
+                    hovertemplate="%{x} %{y:,}<br>월평균기온 %{customdata:.2f}℃"
                 ))
                 if show_best:
                     rb = P_best[P_best["연"] == int(y)].sort_values("월")
-                    temps_b = (fut_base[fut_base["연"] == int(y)].sort_values("월")["예상기온"] + d_best).values
                     fig.add_trace(go.Scatter(
-                        x=[f"{int(m)}월" for m in rb["월"]], y=rb["pred"],
-                        mode="lines", name=f"예측(Best) {y}",
+                        x=[f"{int(m)}월" for m in rb["월"]],
+                        y=rb["pred"],
+                        customdata=np.round(rb["T_best"].values.astype(float), 2),
+                        mode="lines",
+                        name=f"예측(Best) {y}",
                         line=dict(dash="dash"),
-                        customdata=np.round(temps_b, 1),
-                        hovertemplate="%{x} %{y:,}<br>월평균기온: %{customdata:.1f}℃"
+                        hovertemplate="%{x} %{y:,}<br>월평균기온 %{customdata:.2f}℃"
                     ))
                 if show_cons:
                     rc = P_cons[P_cons["연"] == int(y)].sort_values("월")
-                    temps_c = (fut_base[fut_base["연"] == int(y)].sort_values("월")["예상기온"] + d_cons).values
                     fig.add_trace(go.Scatter(
-                        x=[f"{int(m)}월" for m in rc["월"]], y=rc["pred"],
-                        mode="lines", name=f"예측(Conservative) {y}",
+                        x=[f"{int(m)}월" for m in rc["월"]],
+                        y=rc["pred"],
+                        customdata=np.round(rc["T_cons"].values.astype(float), 2),
+                        mode="lines",
+                        name=f"예측(Conservative) {y}",
                         line=dict(dash="dash"),
-                        customdata=np.round(temps_c, 1),
-                        hovertemplate="%{x} %{y:,}<br>월평균기온: %{customdata:.1f}℃"
+                        hovertemplate="%{x} %{y:,}<br>월평균기온 %{customdata:.2f}℃"
                     ))
-            # 기온추세분석선 — hover에 추세기온
+            # ── 기온추세분석
             for y in years_trnd:
                 row = P_trend[P_trend["연"] == int(y)].sort_values("월")
-                temps_t = fut_base[fut_base["연"] == int(y)].sort_values("월")["추세기온"].values
                 fig.add_trace(go.Scatter(
-                    x=[f"{int(m)}월" for m in row["월"]], y=row["pred"],
-                    mode="lines", name=f"기온추세분석 {y}",
+                    x=[f"{int(m)}월" for m in row["월"]],
+                    y=row["pred"],
+                    customdata=np.round(row["T_trend"].values.astype(float), 2),
+                    mode="lines",
+                    name=f"기온추세분석 {y}",
                     line=dict(dash="dot"),
-                    customdata=np.round(temps_t, 1),
-                    hovertemplate="%{x} %{y:,}<br>월평균기온(추세): %{customdata:.1f}℃"
+                    hovertemplate="%{x} %{y:,}<br>월평균기온 %{customdata:.2f}℃"
                 ))
             fig.update_layout(
                 title=f"{prod} — Poly-3 (Train R²={r2_train:.3f})",
-                xaxis=dict(title="월"), yaxis=dict(title="공급량 (MJ)", rangemode="tozero"),
+                xaxis=dict(title="월"),
+                yaxis=dict(title="공급량 (MJ)", rangemode="tozero"),
                 legend=dict(orientation="h", yanchor="bottom", y=-0.18, xanchor="left", x=0),
                 margin=dict(t=60, b=120, l=40, r=20),
                 dragmode="pan",
@@ -891,7 +895,7 @@ def render_cooling_sales_forecast():
     show_poly3 = view_choice in ["3차(Poly-3)", "둘 다"]
     show_poly4 = view_choice in ["4차(Poly-4)", "둘 다"]
 
-    # Poly-3
+    # Poly-3 (… 이하 동일 구조 — 생략 없이 기존 코드 유지 …)
     if show_poly3:
         st.subheader("시나리오 Δ°C (평균기온 보정) — Poly-3")
         c1, c2, c3 = st.columns(3)
