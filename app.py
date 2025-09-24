@@ -469,29 +469,28 @@ def render_supply_forecast():
             index=False,
         )
 
-        # 연도 합: '월' 제거 + '월평균기온' 열 자체 제거
+        # 연도 합: '월' 제거 + 기온열 제거 + 기간(1~12월) 추가
         year_sum = table.groupby("연").sum(numeric_only=True).reset_index()
-        # ▶ 변경: 월/월평균기온 둘 다 삭제
         year_sum_show = year_sum.drop(columns=[c for c in ["월", temp_col_name] if c in year_sum.columns])
-        cols_int = [c for c in year_sum_show.columns if c not in ["연"]]  # ▶ 변경
+        year_sum_show.insert(1, "기간", "1~12월")  # ▶ 변경: '연' 오른쪽에 기간 열 추가
+        cols_int = [c for c in year_sum_show.columns if c not in ["연", "기간"]]  # ▶ 변경: 숫자 포맷 대상 갱신
 
         title_with_icon("🗓️", "연도별 총계", "h4", small=True)
         render_centered_table(year_sum_show, int_cols=cols_int, index=False)
 
-        # 반기 합: '월' 제거 + '월평균기온' 열 자체 제거
+        # 반기 합: '월' 제거 + 기온열 제거 (기존 그대로)
         tmp = table.copy()
         tmp["__half"] = np.where(tmp["월"].astype(int) <= 6, "1~6월", "7~12월")
         half = tmp.groupby(["연", "__half"]).sum(numeric_only=True).reset_index().rename(columns={"__half": "반기"})
-        # ▶ 변경: 월/월평균기온 둘 다 삭제
         half_to_show = half.rename(columns={"반기": "기간"}).drop(columns=[c for c in ["월", temp_col_name] if c in half.columns])
         title_with_icon("🧮", "반기별 총계 (1~6월, 7~12월)", "h4", small=True)
         render_centered_table(
             half_to_show,
-            int_cols=[c for c in half_to_show.columns if c not in ["연", "기간"]],  # ▶ 변경
+            int_cols=[c for c in half_to_show.columns if c not in ["연", "기간"]],
             index=False,
         )
 
-        # 다운로드용 반환도 동일(기온 열 제거본)
+        # 다운로드용 반환
         return year_sum_show, half_to_show
 
     tbl_n = _forecast_table(d_norm)
