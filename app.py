@@ -1008,6 +1008,9 @@ def render_cooling_sales_forecast():
 # ===========================================================
 # C) 공급량 추세분석 예측 — OLS/CAGR/Holt/SES + ARIMA/SARIMA
 # ===========================================================
+# ===========================================================
+# C) 공급량 추세분석 예측 — OLS/CAGR/Holt/SES + ARIMA/SARIMA
+# ===========================================================
 def render_trend_forecast():
     title_with_icon("📈", "공급량 추세분석 예측 (연도별 총합 · Normal)", "h2")
 
@@ -1184,7 +1187,9 @@ def render_trend_forecast():
     if not _HAS_SM:
         st.info("🔧 ARIMA/SARIMA는 statsmodels 미설치 환경에선 계산되지 않습니다.")
 
+    # ─────────────────────────────────────────────────────────
     # 화면: 상품별 카드
+    # ─────────────────────────────────────────────────────────
     for prod in prods:
         yearly = base.groupby("연").sum(numeric_only=True).reset_index()[["연", prod]].dropna().astype({"연": int})
         train = yearly[yearly["연"].isin(years_sel)].sort_values("연")
@@ -1220,7 +1225,17 @@ def render_trend_forecast():
                 df_tbl[k] = vals_k
         render_centered_table(df_tbl, int_cols=[c for c in df_tbl.columns if c != "연"], index=False)
 
-        # 그래프 ①
+        # ─────────────────────────────────────────────────────
+        # 상단 그래프용 "방법별 토글" 바 (신규) → 상단 그래프에도 동일 적용
+        # ─────────────────────────────────────────────────────
+        st.markdown("**방법별 표시 토글(상단)**")
+        toggles_top = {}
+        cols_top = st.columns(min(6, len(methods_selected))) or [st]
+        for i, name in enumerate(methods_selected):
+            with cols_top[i % len(cols_top)]:
+                toggles_top[name] = st.toggle(name, value=True, key=f"tg_top_{prod}_{name}")
+
+        # 그래프 ① (상단): 선택한 방법만 예측 포인트 표시
         if go is None:
             fig, ax = plt.subplots(figsize=(10, 4.2))
             yd = yearly_all[["연", prod]].dropna().sort_values("연")
@@ -1229,7 +1244,7 @@ def render_trend_forecast():
             markers = {"CAGR(복리성장)": "o", "Holt(지수평활)": "s", "OLS(선형추세)": "^",
                        "지수평활(SES)": "+", "ARIMA": "x", "SARIMA(12)": "D"}
             for name in methods_selected:
-                if name in pred_map:
+                if name in pred_map and toggles_top.get(name, True):
                     xs = years_pred
                     ys = [pred_map[name].get(y, np.nan) for y in xs]
                     ax.scatter(xs, ys, label=name, marker=markers.get(name, "o"))
@@ -1246,7 +1261,7 @@ def render_trend_forecast():
             sym = {"CAGR(복리성장)": "circle", "Holt(지수평활)": "square", "OLS(선형추세)": "triangle-up",
                    "지수평활(SES)": "cross", "ARIMA": "x", "SARIMA(12)": "diamond"}
             for name in methods_selected:
-                if name in pred_map:
+                if name in pred_map and toggles_top.get(name, True):
                     xs = years_pred; ys = [pred_map[name].get(y, np.nan) for y in xs]
                     fig.add_trace(go.Scatter(
                         x=xs, y=ys, mode="markers+text", name=name,
@@ -1263,7 +1278,7 @@ def render_trend_forecast():
             )
             st.plotly_chart(fig, use_container_width=True)
 
-        # 그래프 ②: 방법별 토글
+        # 그래프 ②: (기존) 하단 방법별 토글 — 유지
         if go is not None:
             with st.expander(f"🔀 {prod} 방법별 표시 토글(동적)"):
                 toggles = {}
