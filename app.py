@@ -963,7 +963,7 @@ def render_cooling_sales_forecast():
             avg_month = monthly_cal.loc[(monthly_cal["연"] == m.year) & (monthly_cal["월"] == m.month), "기온"].mean()
             rows.append({"연": int(m.year), "월": int(m.month), "기간평균기온": avg_period, "당월평균기온": avg_month})
         pred_base = pd.DataFrame(rows)
-        for c in ["기간평균기온", "당월평균기온"]]:
+        for c in ["기간평균기온", "당월평균기온"]:
             miss = pred_base[c].isna()
             if miss.any():
                 pred_base.loc[miss, c] = pred_base.loc[miss, "월"].map(fallback_by_M)
