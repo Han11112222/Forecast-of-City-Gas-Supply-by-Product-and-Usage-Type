@@ -1117,10 +1117,10 @@ def render_trend_forecast():
         return out
 
     def _fore_ses(vals, target_len, alpha=0.3):
-        l = float(vals[0])
-        for v in vals[1:]]:
-            l = alpha * float(v) + (1 - alpha) * l
-        return [l for _ in range(target_len)]
+    l = float(vals[0])
+    for v in vals[1:]:
+        l = alpha * float(v) + (1 - alpha) * l
+    return [l for _ in range(target_len)]
 
     def _fore_holt(vals, target_len, alpha=0.3, beta=0.1):
         l = float(vals[0]); b = float(vals[1] - vals[0]) if len(vals) >= 2 else 0.0
