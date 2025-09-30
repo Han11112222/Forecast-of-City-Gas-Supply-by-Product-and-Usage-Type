@@ -207,18 +207,24 @@ def read_temperature_forecast(file):
         df = pd.read_excel(xls, sheet_name=sheet)
     except Exception:
         df = pd.read_excel(file, engine="openpyxl")
+
     df.columns = [str(c).strip() for c in df.columns]
     date_col = next((c for c in df.columns if c in ["날짜", "일자", "date", "Date"]), df.columns[0])
     base_temp_col = next(
-        (c for c in df.columns if ("평균기온" in c) or (str(c).lower() in ["temp", "temperature", "기온"])), None
+        (c for c in df.columns if ("평균기온" in c) or (str(c).lower() in ["temp", "temperature", "기온"])),
+        None
     )
     trend_cols = [c for c in df.columns if any(k in str(c) for k in ["추세분석", "추세기온"])]
-    trend_col = trend_cols[0] if trend_cols exist else None
+    trend_col = trend_cols[0] **if trend_cols else None**   # ← 여기!
+
     if base_temp_col is None:
         raise ValueError("기온예측 파일에서 '평균기온' 또는 '기온' 열을 찾지 못했습니다.")
-    d = pd.DataFrame(
-        {"날짜": pd.to_datetime(df[date_col], errors="coerce"), "예상기온": pd.to_numeric(df[base_temp_col], errors="coerce")}
-    ).dropna(subset=["날짜"])
+
+    d = pd.DataFrame({
+        "날짜": pd.to_datetime(df[date_col], errors="coerce"),
+        "예상기온": pd.to_numeric(df[base_temp_col], errors="coerce")
+    }).dropna(subset=["날짜"])
+
     d["연"] = d["날짜"].dt.year.astype(int)
     d["월"] = d["날짜"].dt.month.astype(int)
     d["추세기온"] = pd.to_numeric(df[trend_col], errors="coerce") if trend_col else np.nan
