@@ -260,7 +260,7 @@ def fit_poly4_and_predict(x_train, y_train, x_future):
     y_future = model.predict(poly.transform(x_future))
     return y_future, r2, model, poly
 
-# ▼ 수정: Poly-3 방정식 표기(소수 4자리, 지수표기 금지)
+# ▼ Poly-3 방정식 텍스트
 def poly_eq_text(model, decimals: int = 4):
     c = model.coef_
     c1 = c[0] if len(c) > 0 else 0.0
@@ -295,6 +295,33 @@ def render_centered_table(df: pd.DataFrame, float1_cols=None, int_cols=None, ind
                 .map(lambda x: "" if pd.isna(x) else f"{int(x):,}")
             )
     st.markdown(show.to_html(index=index, classes="centered-table"), unsafe_allow_html=True)
+
+# ───────────── 추천 학습기간(rolling start ~ 현재) R² 유틸 ─────────────
+def _r2_for_range(df: pd.DataFrame, prod: str, temp_col: str, start_year: int, end_year: int | None = None):
+    if end_year is None:
+        end_year = int(df["연"].max())
+    sub = df[(df["연"] >= int(start_year)) & (df["연"] <= int(end_year))][[temp_col, prod]].dropna()
+    if len(sub) < 12:
+        return np.nan
+    x = sub[temp_col].astype(float).to_numpy()
+    y = sub[prod].astype(float).to_numpy()
+    _, r2, _, _ = fit_poly3_and_predict(x, y, x)
+    return float(r2)
+
+def recommend_train_ranges(df: pd.DataFrame, prod: str, temp_col: str,
+                           min_year: int | None = None, end_year: int | None = None) -> pd.DataFrame:
+    """start_year ∈ [min_year .. end_year-1] 대해 (start_year~end_year) R² 계산"""
+    if min_year is None:
+        min_year = int(df["연"].min())
+    if end_year is None:
+        end_year = int(df["연"].max())
+    rows = []
+    for sy in range(int(min_year), int(end_year) + 1):
+        r2 = _r2_for_range(df, prod, temp_col, sy, end_year)
+        rows.append({"시작연도": sy, "종료연도": int(end_year), "기간": f"{sy}~현재", "R2": r2})
+    out = pd.DataFrame(rows)
+    out["__rank"] = out["R2"].fillna(-1.0)
+    return out.sort_values("__rank", ascending=False).drop(columns="__rank").reset_index(drop=True)
 
 # ===========================================================
 # A) 공급량 예측
@@ -352,6 +379,15 @@ def render_supply_forecast():
         default_products = [c for c in KNOWN_PRODUCT_ORDER if c in product_cols] or product_cols[:6]
         prods = st.multiselect("📦 상품(용도) 선택", product_cols, default=default_products)
 
+        # 👉 전역 추천 패널에서 쓰도록 메타 저장
+        st.session_state["supply_meta"] = {
+            "df": df.dropna(subset=["연","월"]).copy(),
+            "temp_col": temp_col,
+            "product_cols": product_cols,
+            "latest_year": int(df["연"].max()),
+            "min_year": int(df["연"].min()),
+        }
+
         title_with_icon("⚙️", "예측 설정", "h3", small=True)
         last_year = int(df["연"].max())
         years = list(range(2010, 2036))
@@ -378,7 +414,7 @@ def render_supply_forecast():
         fut_idx = month_range_inclusive(f_start, f_end)
         fut_base = pd.DataFrame({"연": fut_idx.year.astype(int), "월": fut_idx.month.astype(int)})
 
-        # ✔️ 단순 병합 (버그 제거)
+        # ✔️ 단순 병합
         fut_base = fut_base.merge(forecast_df, on=["연", "월"], how="left")
 
         monthly_avg_temp = train_df.groupby("월")[temp_col].mean().rename("월평균").reset_index()
@@ -459,7 +495,7 @@ def render_supply_forecast():
         pivot = pivot[["연", "월", "월평균기온(추세)"] + ordered + others]
         return pivot.sort_values(["연", "월"]).reset_index(drop=True)
 
-    # 표 + 연도별/반기별 총계
+    # 표 + 연/반기 총계
     def _render_with_year_sums(title, table, temp_col_name):
         title_with_icon("🗂️", title, "h3", small=True)
         render_centered_table(
@@ -468,17 +504,13 @@ def render_supply_forecast():
             int_cols=[c for c in table.columns if c not in ["연", "월", temp_col_name]],
             index=False,
         )
-
-        # 연도 합: '월' 제거 + 기온열 제거 + 기간(1~12월) 추가
         year_sum = table.groupby("연").sum(numeric_only=True).reset_index()
         year_sum_show = year_sum.drop(columns=[c for c in ["월", temp_col_name] if c in year_sum.columns])
         year_sum_show.insert(1, "기간", "1~12월")
         cols_int = [c for c in year_sum_show.columns if c not in ["연", "기간"]]
-
         title_with_icon("🗓️", "연도별 총계", "h4", small=True)
         render_centered_table(year_sum_show, int_cols=cols_int, index=False)
 
-        # 반기 합
         tmp = table.copy()
         tmp["__half"] = np.where(tmp["월"].astype(int) <= 6, "1~6월", "7~12월")
         half = tmp.groupby(["연", "__half"]).sum(numeric_only=True).reset_index().rename(columns={"__half": "반기"})
@@ -501,7 +533,7 @@ def render_supply_forecast():
     sum_c, half_c = _render_with_year_sums("🛡️ Conservative", tbl_c, "월평균기온")
     sum_t, half_t = _render_with_year_sums("📈 기온추세분석", tbl_trd, "월평균기온(추세)")
 
-    # 다운로드 (✔️ 메타정보 + 반기합 포함)
+    # 다운로드
     def _pack_for_download(df_list, names, temp_names):
         outs = []
         for df, nm, tnm in zip(df_list, names, temp_names):
@@ -518,7 +550,6 @@ def render_supply_forecast():
         ["월평균기온", "월평균기온", "월평균기온", "월평균기온(추세)"],
     )
 
-    # 메타 텍스트
     learn_years = sorted([int(y) for y in mats["years_sel"]])
     meta_learn  = f"{min(learn_years)}~{max(learn_years)}년" if learn_years else "-"
     all_years = sorted([int(y) for y in base["연"].unique()])
@@ -605,7 +636,6 @@ def render_supply_forecast():
         back = train_df.groupby("월")[temp_col].mean().reindex(fut_base["월"]).values
         x_future_trend = np.where(np.isnan(x_future_trend), back, x_future_trend)
 
-    # Plotly Hover 준비
     fut_with_t = fut_base.copy()
     fut_with_t["T_norm"] = x_future_norm
     fut_with_t["T_best"] = x_future_best
@@ -627,7 +657,6 @@ def render_supply_forecast():
         y_trd, _, _, _ = fit_poly3_and_predict(x_train, y_train_prod, x_future_trend)
         P_trend = fut_with_t[["연", "월", "T_trend"]].copy(); P_trend["pred"] = np.clip(np.rint(y_trd).astype(np.int64), 0, None)
 
-        # ───────── 그래프 ─────────
         if go is None:
             fig = plt.figure(figsize=(9, 3.6)); ax = plt.gca()
             for y in sorted([int(v) for v in years_view]):
@@ -651,7 +680,6 @@ def render_supply_forecast():
             ax.legend(loc="best"); st.pyplot(fig, clear_figure=True)
         else:
             fig = go.Figure()
-            # 실적
             for y in sorted([int(v) for v in years_view]):
                 one = base[base["연"] == y][["월", prod]].dropna().sort_values("월")
                 t_one = actual_temp[actual_temp["연"] == y].sort_values("월")
@@ -664,7 +692,6 @@ def render_supply_forecast():
                     name=f"{y} 실적",
                     hovertemplate="%{x} %{y:,}<br>월평균기온 %{customdata:.2f}℃"
                 ))
-            # 예측(Normal/Best/Cons)
             for y in years_pred:
                 row = P_norm[P_norm["연"] == int(y)].sort_values("월")
                 fig.add_trace(go.Scatter(
@@ -677,6 +704,7 @@ def render_supply_forecast():
                     hovertemplate="%{x} %{y:,}<br>월평균기온 %{customdata:.2f}℃"
                 ))
                 if show_best:
+                    rb = P_best[P_best]["연"] == int(y)
                     rb = P_best[P_best["연"] == int(y)].sort_values("월")
                     fig.add_trace(go.Scatter(
                         x=[f"{int(m)}월" for m in rb["월"]],
@@ -698,7 +726,6 @@ def render_supply_forecast():
                         line=dict(dash="dash"),
                         hovertemplate="%{x} %{y:,}<br>월평균기온 %{customdata:.2f}℃"
                     ))
-            # 기온추세
             for y in years_trnd:
                 row = P_trend[P_trend["연"] == int(y)].sort_values("월")
                 fig.add_trace(go.Scatter(
@@ -720,22 +747,16 @@ def render_supply_forecast():
             )
             st.plotly_chart(fig, use_container_width=True, config=dict(scrollZoom=True, displaylogo=False))
 
-        # ───────── 신규: 그래프 하단 월별 표(선택 연도 전부) ─────────
+        # 월별 표
         title_with_icon("📑", f"{prod} — 월별 표 (선택 연도)", "h3", small=True)
         months_idx = list(range(1, 13))
         table = pd.DataFrame({"월": months_idx})
-
-        # 실적 컬럼
         for y in sorted([int(v) for v in years_view]):
             s = base.loc[base["연"] == y, ["월", prod]].set_index("월")[prod].astype(float)
             table[f"{y} 실적"] = s.reindex(months_idx).values
-
-        # 예측 Normal (항상 표시)
         for y in years_pred:
             s = P_norm[P_norm["연"] == int(y)][["월", "pred"]].set_index("월")["pred"]
             table[f"예측(Normal) {y}"] = s.reindex(months_idx).values
-
-        # 예측 Best/Cons (토글에 따라)
         if show_best:
             for y in years_pred:
                 s = P_best[P_best["연"] == int(y)][["월", "pred"]].set_index("월")["pred"]
@@ -744,25 +765,17 @@ def render_supply_forecast():
             for y in years_pred:
                 s = P_cons[P_cons["연"] == int(y)][["월", "pred"]].set_index("월")["pred"]
                 table[f"예측(Conservative) {y}"] = s.reindex(months_idx).values
-
-        # 기온추세
         for y in years_trnd:
             s = P_trend[P_trend["연"] == int(y)][["월", "pred"]].set_index("월")["pred"]
             table[f"기온추세 {y}"] = s.reindex(months_idx).values
 
-        # 합계 행 추가
         sum_row = {"월": "합계"}
         for c in [col for col in table.columns if col != "월"]:
             sum_row[c] = pd.to_numeric(table[c], errors="coerce").sum()
         table_show = pd.concat([table, pd.DataFrame([sum_row])], ignore_index=True)
+        render_centered_table(table_show, int_cols=[c for c in table_show.columns if c != "월"], index=False)
 
-        render_centered_table(
-            table_show,
-            int_cols=[c for c in table_show.columns if c != "월"],
-            index=False,
-        )
-
-        # ───────── 산점도 ─────────
+        # 산점도
         title_with_icon("🔎", f"{prod} — 기온·공급량 상관(Train, R²={r2_train:.3f})", "h3", small=True)
         figc, axc = plt.subplots(figsize=(10, 5.2))
         x_tr = train_df[temp_col].astype(float).values
@@ -974,7 +987,6 @@ def render_cooling_sales_forecast():
             mime="text/csv",
         )
 
-        # 검증
         st.subheader("판매량 예측 검증 — Poly-3")
         valid_pred = sale_n[sale_n["월"] != "종계"].copy()
         valid_pred["연"] = pd.to_numeric(valid_pred["연"], errors="coerce").astype("Int64")
@@ -990,7 +1002,6 @@ def render_cooling_sales_forecast():
         render_centered_table(comp[["연", "월", "실제판매량", "예측판매량", "오차", "오차율(%)"]],
                               int_cols=["실제판매량", "예측판매량", "오차"], index=False)
 
-        # 그래프(Normal)
         st.subheader("그래프 (Normal 기준) — Poly-3")
         years_default = years_all[-5:] if len(years_all) >= 5 else years_all
         years_view = st.multiselect("표시할 실적 연도", options=years_all,
@@ -1025,7 +1036,6 @@ def render_cooling_sales_forecast():
                  bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75))
         st.pyplot(fig2)
 
-        # 산점
         st.subheader(f"기온-냉방용 실적 상관관계 (Train, R²={r2_fit:.3f}) — Poly-3")
         fig3, ax3 = plt.subplots(figsize=(10, 5.2))
         ax3.scatter(x_train, y_train, alpha=0.65, label="학습 샘플")
@@ -1156,10 +1166,8 @@ def render_trend_forecast():
         return best
 
     def _fore_arima_yearsum(prod: str, target_years: list[int]) -> dict:
-        """월별→연도합 ARIMA 실패 시, 연도합 시계열에 직접 ARIMA 폴백."""
         if not _HAS_SM: return {y: np.nan for y in target_years}
         out = {y: np.nan for y in target_years}
-        # 1) 월별
         try:
             ts_m = _monthly_series_for(prod)
             train_m = _prepare_train_series(ts_m, years_sel)
@@ -1177,7 +1185,6 @@ def render_trend_forecast():
                         if y in df_year.index: out[y] = float(df_year.loc[y])
         except Exception:
             pass
-        # 2) 폴백: 연도합 직접
         if all(np.isnan(list(out.values()))):
             try:
                 ys = _yearly_series_for(prod); ys_train = ys[ys.index.isin(years_sel)]
@@ -1196,7 +1203,6 @@ def render_trend_forecast():
     def _fore_sarima_yearsum(prod: str, target_years: list[int]) -> dict:
         if not _HAS_SM: return {y: np.nan for y in target_years}
         out = {y: np.nan for y in target_years}
-        # 1) 월별 SARIMA
         try:
             ts = _monthly_series_for(prod); train = _prepare_train_series(ts, years_sel)
             if not train.empty:
@@ -1213,7 +1219,6 @@ def render_trend_forecast():
                     if y in df_year.index: out[y] = float(df_year.loc[y])
         except Exception:
             pass
-        # 2) 폴백: 연도합 ARIMA
         if all(np.isnan(list(out.values()))):
             return _fore_arima_yearsum(prod, target_years)
         return out
@@ -1221,7 +1226,6 @@ def render_trend_forecast():
     if not _HAS_SM:
         st.info("🔧 ARIMA/SARIMA는 statsmodels 미설치 환경에선 계산되지 않습니다.")
 
-    # 화면: 상품별 카드
     for prod in prods:
         yearly = base.groupby("연").sum(numeric_only=True).reset_index()[["연", prod]].dropna().astype({"연": int})
         train = yearly[yearly["연"].isin(years_sel)].sort_values("연")
@@ -1232,20 +1236,13 @@ def render_trend_forecast():
         vals = train[prod].astype(float).tolist()
 
         pred_map = {}
-        if "OLS(선형추세)" in methods_selected:
-            pred_map["OLS(선형추세)"] = _fore_ols(yrs, vals, years_pred)
-        if "CAGR(복리성장)" in methods_selected:
-            pred_map["CAGR(복리성장)"] = _fore_cagr(yrs, vals, years_pred)
-        if "지수평활(SES)" in methods_selected:
-            pred_map["지수평활(SES)"] = dict(zip(years_pred, _fore_ses(vals, len(years_pred))))
-        if "Holt(지수평활)" in methods_selected:
-            pred_map["Holt(지수평활)"] = dict(zip(years_pred, _fore_holt(vals, len(years_pred))))
-        if "ARIMA" in methods_selected:
-            pred_map["ARIMA"] = _fore_arima_yearsum(prod, years_pred)
-        if "SARIMA(12)" in methods_selected:
-            pred_map["SARIMA(12)"] = _fore_sarima_yearsum(prod, years_pred)
+        pred_map["OLS(선형추세)"] = _fore_ols(yrs, vals, years_pred) if "OLS(선형추세)" in methods_selected else {}
+        pred_map["CAGR(복리성장)"] = _fore_cagr(yrs, vals, years_pred) if "CAGR(복리성장)" in methods_selected else {}
+        pred_map["지수평활(SES)"] = dict(zip(years_pred, [vals[-1]]*len(years_pred))) if "지수평활(SES)" in methods_selected else {}
+        pred_map["Holt(지수평활)"] = dict(zip(years_pred, _fore_holt(vals, len(years_pred)))) if "Holt(지수평활)" in methods_selected else {}
+        if "ARIMA" in methods_selected: pred_map["ARIMA"] = _fore_arima_yearsum(prod, years_pred)
+        if "SARIMA(12)" in methods_selected: pred_map["SARIMA(12)"] = _fore_sarima_yearsum(prod, years_pred)
 
-        # 예측표
         title_with_icon("📋", f"{prod} — 연도별 총합 예측표 (Normal)", "h3", small=True)
         df_tbl = pd.DataFrame({"연": years_pred})
         for k in methods_selected:
@@ -1257,7 +1254,6 @@ def render_trend_forecast():
                 df_tbl[k] = vals_k
         render_centered_table(df_tbl, int_cols=[c for c in df_tbl.columns if c != "연"], index=False)
 
-        # 상단 방법별 토글 → 상단 그래프에도 적용
         st.markdown("**방법별 표시 토글(상단)**")
         toggles_top = {}
         cols_top = st.columns(min(6, len(methods_selected))) or [st]
@@ -1265,7 +1261,6 @@ def render_trend_forecast():
             with cols_top[i % len(cols_top)]:
                 toggles_top[name] = st.toggle(name, value=True, key=f"tg_top_{prod}_{name}")
 
-        # 그래프 ① (상단)
         if go is None:
             fig, ax = plt.subplots(figsize=(10, 4.2))
             yd = yearly_all[["연", prod]].dropna().sort_values("연")
@@ -1308,7 +1303,6 @@ def render_trend_forecast():
             )
             st.plotly_chart(fig, use_container_width=True)
 
-        # 그래프 ②: 방법별 토글(동적)
         if go is not None:
             with st.expander(f"🔀 {prod} 방법별 표시 토글(동적)"):
                 toggles = {}
@@ -1353,18 +1347,80 @@ def render_trend_forecast():
 """)
 
 # ===========================================================
-# 라우터
+# 라우터 + 전역 추천 패널/결과 표시
 # ===========================================================
 def main():
     title_with_icon("📊", "도시가스 공급량·판매량 예측")
     st.caption("공급량: 기온↔공급량 3차 다항식 · 판매량(냉방용): (전월16~당월15) 평균기온 기반")
 
     with st.sidebar:
+        # ⬇️ 요청: 예측유형 라디오 바로 위에 전역 추천 패널
+        with st.expander("🎯 추천 학습 데이터 기간(공급량)", expanded=False):
+            meta = st.session_state.get("supply_meta")
+            if not meta:
+                st.info("공급량 예측 탭에서 데이터(실적·기온예측)를 먼저 불러오면 추천이 가능합니다.")
+            else:
+                prod_cols = meta["product_cols"] or []
+                default_prod = prod_cols[0] if prod_cols else None
+                rec_prod = st.selectbox("대상 상품(1개)", options=prod_cols, index=0, key="rec_prod_global")
+                st.caption(f"기준 종료연도: **{meta['latest_year']}** (데이터 최신연도)")
+                if st.button("🔎 추천 구간 계산", key="btn_reco_global"):
+                    df0 = meta["df"].copy()
+                    temp_col = meta["temp_col"]
+                    rec_df = recommend_train_ranges(df0, rec_prod, temp_col,
+                                                    min_year=int(meta["min_year"]),
+                                                    end_year=int(meta["latest_year"]))
+                    st.session_state["rec_result_supply"] = {"table": rec_df, "prod": rec_prod, "end": int(meta["latest_year"])}
+                    st.success("추천 학습 구간 계산 완료! 아래 본문 상단에 결과가 표시됩니다.")
+
         title_with_icon("🧭", "예측 유형", "h3", small=True)
         mode = st.radio("🔀 선택",
                         ["공급량 예측", "판매량 예측(냉방용)", "공급량 추세분석 예측"],
                         index=0, label_visibility="visible")
 
+    # 전역 추천 결과 표시(본문 상단)
+    if st.session_state.get("rec_result_supply"):
+        rr = st.session_state["rec_result_supply"]
+        rec_df = rr["table"].copy()
+        prod_name = rr["prod"]
+        title_with_icon("🧠", f"추천 학습 데이터 기간 — {prod_name}", "h2")
+        topk = rec_df.head(2).copy()
+        topk["추천순위"] = np.arange(1, len(topk) + 1)
+        cols = ["추천순위", "기간", "시작연도", "종료연도", "R2"]
+        render_centered_table(topk[cols], float1_cols=["R2"], index=False)
+
+        if go is not None:
+            figr = go.Figure()
+            rec_plot = rec_df.sort_values("시작연도")
+            figr.add_trace(go.Scatter(
+                x=rec_plot["기간"], y=rec_plot["R2"],
+                mode="lines+markers", name="R²(Poly-3)"
+            ))
+            # 1~2위 강조
+            for _, row in topk.iterrows():
+                idxs = rec_plot.index[rec_plot["기간"] == row["기간"]]
+                if len(idxs):
+                    figr.add_vrect(x0=idxs[0]-0.5, x1=idxs[0]+0.5, fillcolor="LightSalmon", opacity=0.25, line_width=0)
+            figr.update_layout(
+                title=f"학습 시작연도별 R² (종료연도={rr['end']})",
+                xaxis_title="학습 기간(시작연도~현재)", yaxis_title="R² (train fit)",
+                margin=dict(t=60, b=60, l=40, r=20), hovermode="x unified",
+            )
+            st.plotly_chart(figr, use_container_width=True)
+        else:
+            figr, axr = plt.subplots(figsize=(10.0, 3.8))
+            rec_plot = rec_df.sort_values("시작연도")
+            axr.plot(rec_plot["시작연도"], rec_plot["R2"], "-o", lw=2)
+            for _, row in topk.iterrows():
+                axr.scatter([row["시작연도"]], [row["R2"]], s=120, marker="*", zorder=5)
+            axr.set_title(f"학습 시작연도별 R² (종료연도={rr['end']})")
+            axr.set_xlabel("시작연도"); axr.set_ylabel("R²")
+            axr.grid(alpha=0.25)
+            st.pyplot(figr, clear_figure=True)
+
+        st.caption("추천 구간을 사이드바의 **학습 데이터 연도 선택**에 반영하면, 아래 모든 예측이 해당 구간으로 학습됩니다.")
+
+    # 라우팅
     if mode == "공급량 예측":
         render_supply_forecast()
     elif mode == "판매량 예측(냉방용)":
