@@ -295,41 +295,6 @@ def render_centered_table(df: pd.DataFrame, float1_cols=None, int_cols=None, ind
                 .map(lambda x: "" if pd.isna(x) else f"{int(x):,}")
             )
     st.markdown(show.to_html(index=index, classes="centered-table"), unsafe_allow_html=True)
-    # ───────────── 추천 학습기간(rolling start ~ 현재) R² 계산 유틸 ─────────────
-def _r2_for_range(df: pd.DataFrame, prod: str, temp_col: str, start_year: int, end_year: int | None = None):
-    if end_year is None:
-        end_year = int(df["연"].max())
-    sub = df[(df["연"] >= int(start_year)) & (df["연"] <= int(end_year))][[temp_col, prod]].dropna()
-    # 샘플이 너무 적으면 R² 불안정 → NaN
-    if len(sub) < 12:
-        return np.nan
-    x = sub[temp_col].astype(float).to_numpy()
-    y = sub[prod].astype(float).to_numpy()
-    # 학습 구간 내부 적합도의 R²
-    _, r2, _, _ = fit_poly3_and_predict(x, y, x)
-    return float(r2)
-
-def recommend_train_ranges(df: pd.DataFrame, prod: str, temp_col: str,
-                           min_year: int | None = None, end_year: int | None = None) -> pd.DataFrame:
-    """start_year ∈ [min_year .. end_year-1] 에 대해 (start_year~end_year) R² 계산"""
-    if min_year is None:
-        min_year = int(df["연"].min())
-    if end_year is None:
-        end_year = int(df["연"].max())
-    rows = []
-    for sy in range(int(min_year), int(end_year) - 0):  # sy~현재
-        r2 = _r2_for_range(df, prod, temp_col, sy, end_year)
-        rows.append({
-            "시작연도": sy,
-            "종료연도": int(end_year),
-            "기간": f"{sy}~현재",
-            "R2": r2
-        })
-    out = pd.DataFrame(rows)
-    # 수치형 정렬용 보조열
-    out["__rank"] = out["R2"].fillna(-1.0)
-    return out.sort_values("__rank", ascending=False).drop(columns="__rank").reset_index(drop=True)
-
 
 # ===========================================================
 # A) 공급량 예측
@@ -386,31 +351,6 @@ def render_supply_forecast():
         product_cols = guess_product_cols(df)
         default_products = [c for c in KNOWN_PRODUCT_ORDER if c in product_cols] or product_cols[:6]
         prods = st.multiselect("📦 상품(용도) 선택", product_cols, default=default_products)
-                # ───────────── 신규: 추천 학습 데이터 기간 ─────────────
-        with st.expander("🎯 추천 학습 데이터 기간", expanded=False):
-            # 추천 대상 상품(1개) 선택 — 기본은 첫 번째 선택상품
-            _default_prod = prods[0] if prods else (product_cols[0] if product_cols else None)
-            rec_prod = st.selectbox("대상 상품(1개)", options=(prods or product_cols), index=0 if _default_prod else 0, key="rec_prod_sel")
-            end_year_opt = int(df["연"].max())
-            st.caption(f"기준 종료연도: **{end_year_opt}** (데이터상 최신연도)")
-            if st.button("🔎 추천 구간 계산", key="btn_reco"):
-                base_all = df.dropna(subset=["연", "월"]).copy()
-                # 날짜 정렬(있으면) → 없으면 연/월 정렬
-                if "날짜" in base_all.columns:
-                    base_all = base_all.sort_values("날짜")
-                else:
-                    base_all = base_all.sort_values(["연", "월"])
-                rec_df = recommend_train_ranges(base_all, rec_prod, temp_col,
-                                                min_year=int(df["연"].min()),
-                                                end_year=end_year_opt)
-                # 세션에 보관 (메인 영역에서 표/차트 표시)
-                st.session_state["rec_result_supply"] = {
-                    "table": rec_df,
-                    "prod": rec_prod,
-                    "end": end_year_opt,
-                }
-                st.success("추천 학습 구간 계산 완료! 아래 본문에 결과가 표시됩니다.")
-
 
         title_with_icon("⚙️", "예측 설정", "h3", small=True)
         last_year = int(df["연"].max())
