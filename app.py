@@ -214,8 +214,10 @@ def read_temperature_forecast(file):
         (c for c in df.columns if ("평균기온" in c) or (str(c).lower() in ["temp", "temperature", "기온"])),
         None
     )
-    trend_cols = [c for c in df.columns if any(k in str(c) for k in ["추세분석", "추세기온"])]
-    trend_col = trend_cols[0] **if trend_cols else None**   # ← 여기!
+    trend_col = trend_cols[0] if trend_cols else None
+# 또는 보다 안전하게
+# trend_col = trend_cols[0] if len(trend_cols) > 0 else None
+
 
     if base_temp_col is None:
         raise ValueError("기온예측 파일에서 '평균기온' 또는 '기온' 열을 찾지 못했습니다.")
