@@ -260,7 +260,6 @@ def fit_poly4_and_predict(x_train, y_train, x_future):
     y_future = model.predict(poly.transform(x_future))
     return y_future, r2, model, poly
 
-# ▼ Poly-3 방정식 텍스트
 def poly_eq_text(model, decimals: int = 4):
     c = model.coef_
     c1 = c[0] if len(c) > 0 else 0.0
@@ -279,13 +278,26 @@ def poly_eq_text4(model):
     d = model.intercept_
     return f"y = {c4:+.5e}x⁴ {c3:+.5e}x³ {c2:+.5e}x² {c1:+.5e}x {d:+.5e}"
 
-def render_centered_table(df: pd.DataFrame, float1_cols=None, int_cols=None, index=False):
+def render_centered_table(df: pd.DataFrame, float1_cols=None, int_cols=None, index=False,
+                          float_cols_decimals: dict | None = None):
+    """기존 형식 + (추가) 특정 열 소수자리 지정: float_cols_decimals={'R2':4}"""
     float1_cols = float1_cols or []
     int_cols = int_cols or []
     show = df.copy()
+
+    # 우선 개별 자리수 지정
+    if float_cols_decimals:
+        for c, dec in float_cols_decimals.items():
+            if c in show.columns:
+                show[c] = pd.to_numeric(show[c], errors="coerce").map(
+                    lambda x: "" if pd.isna(x) else f"{x:.{int(dec)}f}"
+                )
+
+    # 1자리 포맷(기존)
     for c in float1_cols:
-        if c in show.columns:
+        if c in show.columns and (not float_cols_decimals or c not in float_cols_decimals):
             show[c] = pd.to_numeric(show[c], errors="coerce").round(1).map(lambda x: "" if pd.isna(x) else f"{x:.1f}")
+
     for c in int_cols:
         if c in show.columns:
             show[c] = (
@@ -296,7 +308,7 @@ def render_centered_table(df: pd.DataFrame, float1_cols=None, int_cols=None, ind
             )
     st.markdown(show.to_html(index=index, classes="centered-table"), unsafe_allow_html=True)
 
-# ───────────── 추천 학습기간(rolling start ~ 현재) R² 유틸 ─────────────
+# ───────────── 추천 학습기간 R² 유틸 ─────────────
 def _r2_for_range(df: pd.DataFrame, prod: str, temp_col: str, start_year: int, end_year: int | None = None):
     if end_year is None:
         end_year = int(df["연"].max())
@@ -310,7 +322,7 @@ def _r2_for_range(df: pd.DataFrame, prod: str, temp_col: str, start_year: int, e
 
 def recommend_train_ranges(df: pd.DataFrame, prod: str, temp_col: str,
                            min_year: int | None = None, end_year: int | None = None) -> pd.DataFrame:
-    """start_year ∈ [min_year .. end_year-1] 대해 (start_year~end_year) R² 계산"""
+    """start_year ∈ [min_year .. end_year] 대해 (start_year~end_year) R² 계산"""
     if min_year is None:
         min_year = int(df["연"].min())
     if end_year is None:
@@ -413,8 +425,6 @@ def render_supply_forecast():
             st.error("⛔ 예측 종료가 시작보다 빠릅니다."); st.stop()
         fut_idx = month_range_inclusive(f_start, f_end)
         fut_base = pd.DataFrame({"연": fut_idx.year.astype(int), "월": fut_idx.month.astype(int)})
-
-        # ✔️ 단순 병합
         fut_base = fut_base.merge(forecast_df, on=["연", "월"], how="left")
 
         monthly_avg_temp = train_df.groupby("월")[temp_col].mean().rename("월평균").reset_index()
@@ -690,6 +700,7 @@ def render_supply_forecast():
                     customdata=np.round(one["T_actual"].values.astype(float), 2),
                     mode="lines+markers",
                     name=f"{y} 실적",
+                    marker=dict(size=7),
                     hovertemplate="%{x} %{y:,}<br>월평균기온 %{customdata:.2f}℃"
                 ))
             for y in years_pred:
@@ -700,11 +711,10 @@ def render_supply_forecast():
                     customdata=np.round(row["T_norm"].values.astype(float), 2),
                     mode="lines",
                     name=f"예측(Normal) {y}",
-                    line=dict(dash="dash"),
+                    line=dict(dash="dash", width=3),
                     hovertemplate="%{x} %{y:,}<br>월평균기온 %{customdata:.2f}℃"
                 ))
                 if show_best:
-                    rb = P_best[P_best]["연"] == int(y)
                     rb = P_best[P_best["연"] == int(y)].sort_values("월")
                     fig.add_trace(go.Scatter(
                         x=[f"{int(m)}월" for m in rb["월"]],
@@ -1354,14 +1364,13 @@ def main():
     st.caption("공급량: 기온↔공급량 3차 다항식 · 판매량(냉방용): (전월16~당월15) 평균기온 기반")
 
     with st.sidebar:
-        # ⬇️ 요청: 예측유형 라디오 바로 위에 전역 추천 패널
+        # ⬇️ 예측유형 라디오 바로 위: 전역 추천 패널
         with st.expander("🎯 추천 학습 데이터 기간(공급량)", expanded=False):
             meta = st.session_state.get("supply_meta")
             if not meta:
                 st.info("공급량 예측 탭에서 데이터(실적·기온예측)를 먼저 불러오면 추천이 가능합니다.")
             else:
                 prod_cols = meta["product_cols"] or []
-                default_prod = prod_cols[0] if prod_cols else None
                 rec_prod = st.selectbox("대상 상품(1개)", options=prod_cols, index=0, key="rec_prod_global")
                 st.caption(f"기준 종료연도: **{meta['latest_year']}** (데이터 최신연도)")
                 if st.button("🔎 추천 구간 계산", key="btn_reco_global"):
@@ -1370,7 +1379,9 @@ def main():
                     rec_df = recommend_train_ranges(df0, rec_prod, temp_col,
                                                     min_year=int(meta["min_year"]),
                                                     end_year=int(meta["latest_year"]))
-                    st.session_state["rec_result_supply"] = {"table": rec_df, "prod": rec_prod, "end": int(meta["latest_year"])}
+                    st.session_state["rec_result_supply"] = {
+                        "table": rec_df, "prod": rec_prod, "end": int(meta["latest_year"])
+                    }
                     st.success("추천 학습 구간 계산 완료! 아래 본문 상단에 결과가 표시됩니다.")
 
         title_with_icon("🧭", "예측 유형", "h3", small=True)
@@ -1383,40 +1394,72 @@ def main():
         rr = st.session_state["rec_result_supply"]
         rec_df = rr["table"].copy()
         prod_name = rr["prod"]
+
         title_with_icon("🧠", f"추천 학습 데이터 기간 — {prod_name}", "h2")
         topk = rec_df.head(2).copy()
         topk["추천순위"] = np.arange(1, len(topk) + 1)
         cols = ["추천순위", "기간", "시작연도", "종료연도", "R2"]
-        render_centered_table(topk[cols], float1_cols=["R2"], index=False)
+        render_centered_table(topk[cols], float_cols_decimals={"R2": 4}, index=False)
+
+        # ── 그래프(멋지게) + 추천 하이라이트
+        cat_labels = rec_df.sort_values("시작연도")["기간"].tolist()
+        r2_vals = rec_df.sort_values("시작연도")["R2"].tolist()
 
         if go is not None:
-            figr = go.Figure()
-            rec_plot = rec_df.sort_values("시작연도")
-            figr.add_trace(go.Scatter(
-                x=rec_plot["기간"], y=rec_plot["R2"],
-                mode="lines+markers", name="R²(Poly-3)"
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=cat_labels, y=r2_vals,
+                mode="lines+markers",
+                marker=dict(size=8),
+                line=dict(width=3),
+                name="R² (train fit)",
+                hovertemplate="%{x}<br>R²=%{y:.4f}<extra></extra>"
             ))
-            # 1~2위 강조
-            for _, row in topk.iterrows():
-                idxs = rec_plot.index[rec_plot["기간"] == row["기간"]]
-                if len(idxs):
-                    figr.add_vrect(x0=idxs[0]-0.5, x1=idxs[0]+0.5, fillcolor="LightSalmon", opacity=0.25, line_width=0)
-            figr.update_layout(
+            # Top 1,2 하이라이트 (배경 + 별표)
+            top_periods = topk["기간"].tolist()
+            for tp in top_periods:
+                fig.add_shape(type="rect", xref="x", yref="paper",
+                              x0=tp, x1=tp, y0=0, y1=1,
+                              line=dict(width=0),
+                              fillcolor="rgba(255,160,122,0.28)")
+                # 별표 마커는 텍스트 레이어로 한 번 더
+                idx = cat_labels.index(tp)
+                fig.add_trace(go.Scatter(
+                    x=[cat_labels[idx]], y=[r2_vals[idx]],
+                    mode="markers+text",
+                    marker=dict(symbol="star", size=14),
+                    text=[f" TOP{top_periods.index(tp)+1} "],
+                    textposition="top center",
+                    name=f"추천 {top_periods.index(tp)+1}",
+                    hoverinfo="skip"
+                ))
+
+            y_min = max(0.0, (min([v for v in r2_vals if pd.notna(v)]) - 0.01))
+            y_max = min(1.0, (max([v for v in r2_vals if pd.notna(v)]) + 0.01))
+            fig.update_layout(
                 title=f"학습 시작연도별 R² (종료연도={rr['end']})",
-                xaxis_title="학습 기간(시작연도~현재)", yaxis_title="R² (train fit)",
-                margin=dict(t=60, b=60, l=40, r=20), hovermode="x unified",
+                xaxis=dict(title="학습 기간(시작연도~현재)", tickangle=-25),
+                yaxis=dict(title="R² (train fit)", range=[y_min, y_max]),
+                margin=dict(t=60, b=80, l=60, r=30),
+                hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=-0.18, xanchor="left", x=0)
             )
-            st.plotly_chart(figr, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            figr, axr = plt.subplots(figsize=(10.0, 3.8))
-            rec_plot = rec_df.sort_values("시작연도")
-            axr.plot(rec_plot["시작연도"], rec_plot["R2"], "-o", lw=2)
-            for _, row in topk.iterrows():
-                axr.scatter([row["시작연도"]], [row["R2"]], s=120, marker="*", zorder=5)
-            axr.set_title(f"학습 시작연도별 R² (종료연도={rr['end']})")
-            axr.set_xlabel("시작연도"); axr.set_ylabel("R²")
-            axr.grid(alpha=0.25)
-            st.pyplot(figr, clear_figure=True)
+            # Matplotlib 버전(카테고리를 인덱스로)
+            xs = np.arange(len(cat_labels))
+            fig, ax = plt.subplots(figsize=(10.8, 4.0))
+            ax.plot(xs, r2_vals, "-o", lw=2.8, ms=6)
+            for i, tp in enumerate(topk["기간"].tolist()):
+                j = cat_labels.index(tp)
+                ax.axvspan(j-0.4, j+0.4, color=(1.0, 0.64, 0.5, 0.28))
+                ax.scatter([j], [r2_vals[j]], s=160, marker="*", zorder=5)
+                ax.text(j, r2_vals[j]+0.002, f"TOP{i+1}", ha="center", va="bottom")
+            ax.set_title(f"학습 시작연도별 R² (종료연도={rr['end']})")
+            ax.set_ylabel("R² (train fit)")
+            ax.set_xticks(xs); ax.set_xticklabels(cat_labels, rotation=25, ha="right")
+            ax.grid(alpha=0.25)
+            st.pyplot(fig, clear_figure=True)
 
         st.caption("추천 구간을 사이드바의 **학습 데이터 연도 선택**에 반영하면, 아래 모든 예측이 해당 구간으로 학습됩니다.")
 
