@@ -1401,65 +1401,82 @@ def main():
         cols = ["추천순위", "기간", "시작연도", "종료연도", "R2"]
         render_centered_table(topk[cols], float_cols_decimals={"R2": 4}, index=False)
 
-        # ── 그래프(멋지게) + 추천 하이라이트
-        cat_labels = rec_df.sort_values("시작연도")["기간"].tolist()
-        r2_vals = rec_df.sort_values("시작연도")["R2"].tolist()
+       # ── 그래프(깔끔한 배경 하이라이트 · 별표 제거)
+cat_labels = rec_df.sort_values("시작연도")["기간"].tolist()
+r2_vals    = rec_df.sort_values("시작연도")["R2"].tolist()
 
-        if go is not None:
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=cat_labels, y=r2_vals,
-                mode="lines+markers",
-                marker=dict(size=8),
-                line=dict(width=3),
-                name="R² (train fit)",
-                hovertemplate="%{x}<br>R²=%{y:.4f}<extra></extra>"
-            ))
-            # Top 1,2 하이라이트 (배경 + 별표)
-            top_periods = topk["기간"].tolist()
-            for tp in top_periods:
-                fig.add_shape(type="rect", xref="x", yref="paper",
-                              x0=tp, x1=tp, y0=0, y1=1,
-                              line=dict(width=0),
-                              fillcolor="rgba(255,160,122,0.28)")
-                # 별표 마커는 텍스트 레이어로 한 번 더
-                idx = cat_labels.index(tp)
-                fig.add_trace(go.Scatter(
-                    x=[cat_labels[idx]], y=[r2_vals[idx]],
-                    mode="markers+text",
-                    marker=dict(symbol="star", size=14),
-                    text=[f" TOP{top_periods.index(tp)+1} "],
-                    textposition="top center",
-                    name=f"추천 {top_periods.index(tp)+1}",
-                    hoverinfo="skip"
-                ))
+# 카테고리 → 숫자 인덱스로 표현 (shape로 폭을 가진 세로 밴드 그리기 위함)
+xpos = list(range(len(cat_labels)))
 
-            y_min = max(0.0, (min([v for v in r2_vals if pd.notna(v)]) - 0.01))
-            y_max = min(1.0, (max([v for v in r2_vals if pd.notna(v)]) + 0.01))
-            fig.update_layout(
-                title=f"학습 시작연도별 R² (종료연도={rr['end']})",
-                xaxis=dict(title="학습 기간(시작연도~현재)", tickangle=-25),
-                yaxis=dict(title="R² (train fit)", range=[y_min, y_max]),
-                margin=dict(t=60, b=80, l=60, r=30),
-                hovermode="x unified",
-                legend=dict(orientation="h", yanchor="bottom", y=-0.18, xanchor="left", x=0)
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            # Matplotlib 버전(카테고리를 인덱스로)
-            xs = np.arange(len(cat_labels))
-            fig, ax = plt.subplots(figsize=(10.8, 4.0))
-            ax.plot(xs, r2_vals, "-o", lw=2.8, ms=6)
-            for i, tp in enumerate(topk["기간"].tolist()):
-                j = cat_labels.index(tp)
-                ax.axvspan(j-0.4, j+0.4, color=(1.0, 0.64, 0.5, 0.28))
-                ax.scatter([j], [r2_vals[j]], s=160, marker="*", zorder=5)
-                ax.text(j, r2_vals[j]+0.002, f"TOP{i+1}", ha="center", va="bottom")
-            ax.set_title(f"학습 시작연도별 R² (종료연도={rr['end']})")
-            ax.set_ylabel("R² (train fit)")
-            ax.set_xticks(xs); ax.set_xticklabels(cat_labels, rotation=25, ha="right")
-            ax.grid(alpha=0.25)
-            st.pyplot(fig, clear_figure=True)
+# 추천 Top1, Top2 인덱스
+top_periods = topk["기간"].tolist()
+top_idx = [cat_labels.index(p) for p in top_periods]
+
+if go is not None:
+    fig = go.Figure()
+
+    # ── 배경 하이라이트(세로 밴드) : Top1은 진하게, Top2는 살짝 연하게
+    for i, idx in enumerate(top_idx):
+        band_color = "rgba(46,204,113,0.22)" if i == 0 else "rgba(52,152,219,0.16)"
+        fig.add_shape(
+            type="rect", xref="x", yref="paper",
+            x0=idx - 0.48, x1=idx + 0.48, y0=0.0, y1=1.0,
+            line=dict(width=0), fillcolor=band_color, layer="below"
+        )
+        # 상단 라벨(미니 캡션) — 심플한 모노톤
+        fig.add_annotation(
+            x=idx, y=1.0, xref="x", yref="paper",
+            text=f"추천 {i+1}", showarrow=False, yshift=18,
+            font=dict(size=11, color="#666")
+        )
+
+    # R² 라인
+    fig.add_trace(go.Scatter(
+        x=xpos, y=r2_vals,
+        mode="lines+markers",
+        line=dict(width=3),
+        marker=dict(size=7),
+        name="R² (train fit)",
+        hovertemplate="%{text}<br>R²=%{y:.4f}<extra></extra>",
+        text=cat_labels
+    ))
+
+    # 축/레이아웃
+    y_min = max(0.0, (min([v for v in r2_vals if pd.notna(v)]) - 0.01))
+    y_max = min(1.0, (max([v for v in r2_vals if pd.notna(v)]) + 0.01))
+    fig.update_layout(
+        title=f"학습 시작연도별 R² (종료연도={rr['end']})",
+        xaxis=dict(
+            title="학습 기간(시작연도~현재)",
+            tickmode="array", tickvals=xpos, ticktext=cat_labels, tickangle=-25
+        ),
+        yaxis=dict(title="R² (train fit)", range=[y_min, y_max]),
+        margin=dict(t=60, b=80, l=60, r=30),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.18, xanchor="left", x=0)
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+else:
+    # Matplotlib 대체: 세로 밴드 + 라인
+    xs = np.arange(len(cat_labels))
+    fig, ax = plt.subplots(figsize=(10.8, 4.0))
+
+    # 하이라이트 밴드
+    for i, idx in enumerate(top_idx):
+        color = (46/255, 204/255, 113/255, 0.22) if i == 0 else (52/255, 152/255, 219/255, 0.16)
+        ax.axvspan(idx-0.48, idx+0.48, color=color, zorder=0)
+        ax.text(idx, 1.02, f"추천 {i+1}", transform=ax.get_xaxis_transform(),
+                ha="center", va="bottom", fontsize=10, color="#666")
+
+    ax.plot(xs, r2_vals, "-o", lw=2.8, ms=6, zorder=2)
+    ax.set_title(f"학습 시작연도별 R² (종료연도={rr['end']})")
+    ax.set_ylabel("R² (train fit)")
+    ax.set_xticks(xs); ax.set_xticklabels(cat_labels, rotation=25, ha="right")
+    ax.set_ylim(y_min, y_max); ax.grid(alpha=0.25)
+    st.pyplot(fig, clear_figure=True)
+
 
         st.caption("추천 구간을 사이드바의 **학습 데이터 연도 선택**에 반영하면, 아래 모든 예측이 해당 구간으로 학습됩니다.")
 
