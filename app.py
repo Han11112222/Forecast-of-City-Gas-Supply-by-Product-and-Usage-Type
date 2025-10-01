@@ -462,11 +462,11 @@ def render_supply_forecast():
     title_with_icon("🌡️", "시나리오 Δ°C (평균기온 보정)", "h3", small=True)
     c1, c2, c3 = st.columns(3)
     with c1:
-        d_norm = st.number_input("Normal Δ°C", value=0.0, step=0.5, format="%.1f", key="s_norm")
+        d_norm = st.number_input("Normal Δ°C", value=0.0, step=0.1, format="%.1f", key="s_norm")
     with c2:
-        d_best = st.number_input("Best Δ°C", value=-1.0, step=0.5, format="%.1f", key="s_best")
+        d_best = st.number_input("Best Δ°C", value=-1.0, step=0.1, format="%.1f", key="s_best")
     with c3:
-        d_cons = st.number_input("Conservative Δ°C", value=1.0, step=0.5, format="%.1f", key="s_cons")
+        d_cons = st.number_input("Conservative Δ°C", value=1.0, step=0.1, format="%.1f", key="s_cons")
 
     def _forecast_table(delta: float) -> pd.DataFrame:
         x_future = (fut_base["예상기온"] + float(delta)).astype(float).values
