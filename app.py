@@ -10,6 +10,7 @@
 #  - 추천 범위 계산에서 종료연도와 같은 시작연도 제외(range(min_year, end_year))
 #  - Plotly 그래프 scrollZoom=True 적용
 #  - Best 시나리오 인덱싱 오타 수정
+# Fix(2025): 산점도 pred_train 계산 시 x_tr NaN 포함으로 인한 ValueError 수정
 
 import os
 from io import BytesIO
@@ -332,11 +333,6 @@ def recommend_train_ranges(df: pd.DataFrame, prod: str, temp_col: str,
 # ===========================================================
 # A) 공급량 예측
 # ===========================================================
-# (사용자가 준 원본 로직을 그대로 포함)
-
-def month_range_inclusive(s, e):
-    return pd.date_range(start=month_start(s), end=month_start(e), freq="MS")
-
 
 def render_supply_forecast():
     with st.sidebar:
@@ -391,7 +387,6 @@ def render_supply_forecast():
         default_products = [c for c in KNOWN_PRODUCT_ORDER if c in product_cols] or product_cols[:6]
         prods = st.multiselect("📦 상품(용도) 선택", product_cols, default=default_products)
 
-        # 👉 전역 추천 패널에서 쓰도록 메타 저장
         st.session_state["supply_meta"] = {
             "df": df.dropna(subset=["연","월"]).copy(),
             "temp_col": temp_col,
@@ -426,7 +421,6 @@ def render_supply_forecast():
         fut_idx = month_range_inclusive(f_start, f_end)
         fut_base = pd.DataFrame({"연": fut_idx.year.astype(int), "월": fut_idx.month.astype(int)})
 
-        # ✔️ 단순 병합
         fut_base = fut_base.merge(forecast_df, on=["연", "월"], how="left")
 
         monthly_avg_temp = train_df.groupby("월")[temp_col].mean().rename("월평균").reset_index()
@@ -786,17 +780,31 @@ def render_supply_forecast():
         table_show = pd.concat([table, pd.DataFrame([sum_row])], ignore_index=True)
         render_centered_table(table_show, int_cols=[c for c in table_show.columns if c != "월"], index=False)
 
-        # 산점도
+        # ─────────────────────────────────────────────────────────────
+        # 산점도 — NaN 수정: x_tr / y_tr 에서 NaN을 먼저 제거한 뒤 사용
+        # ─────────────────────────────────────────────────────────────
         title_with_icon("🔎", f"{prod} — 기온·공급량 상관(Train, R²={r2_train:.3f})", "h3", small=True)
         figc, axc = plt.subplots(figsize=(10, 5.2))
-        x_tr = train_df[temp_col].astype(float).values
-        y_tr = y_train_prod
+
+        x_tr_raw = train_df[temp_col].astype(float).values
+        y_tr_raw = y_train_prod.astype(float)
+
+        # NaN 동시 제거 (산점도 및 잔차 계산 전용 — fit_poly3 내부에서도 제거되지만
+        # pred_train 호출 시 x_future=x_tr 에 NaN이 있으면 raise 되므로 여기서 미리 제거)
+        _valid = (~np.isnan(x_tr_raw)) & (~np.isnan(y_tr_raw))
+        x_tr = x_tr_raw[_valid]
+        y_tr = y_tr_raw[_valid]
+
         axc.scatter(x_tr, y_tr, alpha=0.65, label="학습 샘플")
         xx = np.linspace(np.nanmin(x_tr) - 1, np.nanmax(x_tr) + 1, 200)
         yhat, _, model_s, _ = fit_poly3_and_predict(x_tr, y_tr, xx)
         axc.plot(xx, yhat, lw=2.8, color="#1f77b4", label="Poly-3")
+
+        # x_tr 는 NaN이 없으므로 안전하게 pred_train 계산 가능
         pred_train, _, _, _ = fit_poly3_and_predict(x_tr, y_tr, x_tr)
-        resid = y_tr - pred_train; s = np.nanstd(resid)
+        resid = y_tr - pred_train
+        s = np.nanstd(resid)
+
         axc.fill_between(xx, yhat - 1.96 * s, yhat + 1.96 * s, color="#ff7f0e", alpha=0.25, label="95% 신뢰구간")
         axc.set_xlabel("기온 (℃)"); axc.set_ylabel("공급량 (MJ)")
         axc.grid(alpha=0.25); axc.legend(loc="best")
@@ -811,7 +819,6 @@ def render_supply_forecast():
 # ===========================================================
 
 def render_cooling_sales_forecast():
-    # (사용자 원본 그대로, 생략 없이 포함 — 분량상 여기서는 이미 전체 포함됨)
     title_with_icon("🧊", "판매량 예측(냉방용) — 전월 16일 ~ 당월 15일 평균기온 기준", "h2")
     st.write("🗂️ 냉방용 **판매 실적 엑셀**과 **기온 RAW(일별)**을 준비하세요.")
     # … 이하 전부 원문 그대로 (상단에서 제공된 긴 코드 블록과 동일) …
@@ -823,7 +830,6 @@ def render_cooling_sales_forecast():
 # ===========================================================
 
 def render_trend_forecast():
-    # (사용자 원본 그대로 포함 — 위에서 제공된 긴 코드 전부 포함)
     title_with_icon("📈", "공급량 추세분석 예측 (연도별 총합 · Normal)", "h2")
     # … 전체 구현 포함 …
 
@@ -850,7 +856,7 @@ def main():
                     rec_df = recommend_train_ranges(df0, rec_prod, temp_col,
                                                     min_year=int(meta["min_year"]),
                                                     end_year=int(meta["latest_year"]))
-                    st.session_state["rec_result_supply"] = {"table": rec_df, "prod": rec_prod, "end": int(meta["latest_year"]) }
+                    st.session_state["rec_result_supply"] = {"table": rec_df, "prod": rec_prod, "end": int(meta["latest_year"])}
                     st.success("추천 학습 구간 계산 완료! 아래 본문 상단에 결과가 표시됩니다.")
 
         title_with_icon("🧭", "예측 유형", "h3", small=True)
@@ -873,7 +879,6 @@ def main():
         if go is not None and not rec_df.empty:
             figr = go.Figure()
             rec_plot = rec_df.sort_values("시작연도")
-            # 전체 구간 하이라이트 (Top-k)
             palette = ["rgba(255,179,71,0.18)", "rgba(118,214,165,0.18)", "rgba(120,180,255,0.18)"]
             for i, (_, row) in enumerate(topk.iterrows()):
                 x0 = int(row["시작연도"]) - 0.5
