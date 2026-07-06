@@ -131,10 +131,13 @@ def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
         df["월"] = df["날짜"].dt.month
     for c in df.columns:
         if df[c].dtype == "object":
-            df[c] = pd.to_numeric(
+            converted = pd.to_numeric(
                 df[c].astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False),
-                errors="ignore",
+                errors="coerce",
             )
+            # 변환 성공(NaN이 아닌 값이 절반 이상)이면 숫자 컬럼으로 교체
+            if converted.notna().sum() >= len(converted) * 0.5:
+                df[c] = converted
     return df
 
 def detect_temp_col(df: pd.DataFrame) -> str | None:
