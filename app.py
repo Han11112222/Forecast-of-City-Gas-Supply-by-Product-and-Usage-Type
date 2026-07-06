@@ -472,6 +472,19 @@ def render_supply_forecast():
 
         x_train_base = pd.to_numeric(train_df[temp_col], errors="coerce").astype(float).values
 
+        # ── 디버그: 실제 학습 데이터 값 확인 ──
+        if prods:
+            _p = prods[0]
+            _raw = train_df[_p]
+            _num = pd.to_numeric(_raw.astype(object).astype(str).str.replace(",","",regex=False).str.strip(), errors="coerce")
+            _jan2025 = train_df[(train_df["연"]==2025)&(train_df["월"]==1)]
+            st.info(
+                f"[디버그] '{_p}' dtype={_raw.dtype} / NaN={int(_num.isna().sum())} / 샘플={len(_num)}\n"
+                f"2025-01 raw값: {_jan2025[_p].values if len(_jan2025)>0 else 'N/A'}\n"
+                f"2025-01 num변환: {pd.to_numeric(_jan2025[_p].astype(object).astype(str).str.replace(',','',regex=False).str.strip(), errors='coerce').values if len(_jan2025)>0 else 'N/A'}"
+            )
+        # ────────────────────────────────────
+
         st.session_state["supply_materials"] = dict(
             base_df=base, train_df=train_df, prods=prods, x_train=x_train_base,
             fut_base=fut_base, start_ts=f_start, end_ts=f_end, temp_col=temp_col,
