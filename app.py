@@ -499,7 +499,7 @@ def render_supply_forecast():
         x_future = (fut_base["예상기온"] + float(delta)).astype(float).values
         pred_rows = []
         for col in prods:
-            y_train = train_df[col].astype(float).values
+            y_train = pd.to_numeric(train_df[col], errors="coerce").astype(float).values
             y_future, _, _, _ = fit_poly3_and_predict(x_train, y_train, x_future)
             tmp = fut_base[["연", "월"]].copy()
             tmp["월평균기온"] = x_future
@@ -520,7 +520,7 @@ def render_supply_forecast():
             x_future = np.where(np.isnan(x_future), back, x_future)
         pred_rows = []
         for col in prods:
-            y_train = train_df[col].astype(float).values
+            y_train = pd.to_numeric(train_df[col], errors="coerce").astype(float).values
             y_future, _, _, _ = fit_poly3_and_predict(x_train, y_train, x_future)
             tmp = fut_base[["연", "월"]].copy()
             tmp["월평균기온(추세)"] = x_future
@@ -686,7 +686,7 @@ def render_supply_forecast():
     )
 
     for prod in prods:
-        y_train_prod = train_df[prod].astype(float).values
+        y_train_prod = pd.to_numeric(train_df[prod], errors="coerce").astype(float).values
         y_norm, r2_train, _, _ = fit_poly3_and_predict(x_train, y_train_prod, x_future_norm)
         P_norm = fut_with_t[["연", "월", "T_norm"]].copy(); P_norm["pred"] = np.clip(np.rint(y_norm).astype(np.int64), 0, None)
         y_best, _, _, _ = fit_poly3_and_predict(x_train, y_train_prod, x_future_best)
