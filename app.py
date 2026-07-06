@@ -11,10 +11,8 @@
 #  - Plotly 그래프 scrollZoom=True 적용
 #  - Best 시나리오 인덱싱 오타 수정
 # Fix(2025): 산점도 pred_train 계산 시 x_tr NaN 포함으로 인한 ValueError 수정
-# Fix(2025): 공급량 실적 데이터를 구글 스프레드시트에서 직접 로드
 
 import os
-import requests
 from io import BytesIO
 from pathlib import Path
 import warnings
@@ -142,12 +140,6 @@ def detect_temp_col(df: pd.DataFrame) -> str | None:
 def guess_product_cols(df: pd.DataFrame) -> list[str]:
     numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     candidates = [c for c in numeric_cols if c not in META_COLS]
-    # 기온 관련 컬럼만 제외 (TEMP_HINTS 기준)
-    temp_hints_lower = [h.lower() for h in TEMP_HINTS]
-    candidates = [
-        c for c in candidates
-        if not any(h in str(c).lower() for h in temp_hints_lower)
-    ]
     ordered = [c for c in KNOWN_PRODUCT_ORDER if c in candidates]
     others = [c for c in candidates if c not in ordered]
     return ordered + others
@@ -161,21 +153,6 @@ def read_excel_sheet(path_or_file, prefer_sheet="데이터"):
     except Exception:
         df = pd.read_excel(path_or_file, engine="openpyxl")
     return normalize_cols(df)
-
-# ───────────── 구글 스프레드시트 로드 ─────────────
-_SUPPLY_SHEET_ID = "1vS-a9XrbjjIznHxntuFIM6hmml6qTlR2Cayw77p_Rao"
-_SUPPLY_GID      = "0"
-_SUPPLY_CSV_URL  = (
-    f"https://docs.google.com/spreadsheets/d/{_SUPPLY_SHEET_ID}"
-    f"/export?format=csv&gid={_SUPPLY_GID}"
-)
-
-@st.cache_data(ttl=600)
-def load_supply_from_gsheet() -> pd.DataFrame:
-    resp = requests.get(_SUPPLY_CSV_URL, timeout=15)
-    resp.raise_for_status()
-    raw = pd.read_csv(BytesIO(resp.content))
-    return normalize_cols(raw)
 
 @st.cache_data(ttl=600)
 def read_temperature_raw(file):
@@ -365,15 +342,15 @@ def render_supply_forecast():
 
         if src == "Repo 내 파일 사용":
             data_dir = Path("data"); data_dir.mkdir(exist_ok=True)
-
-            # ── 상품별공급량 실적: 구글 스프레드시트에서 로드 ──────────────
-            try:
-                df = load_supply_from_gsheet()
-                st.success("✅ 구글 스프레드시트(상품별공급량 실적)에서 데이터를 불러왔습니다.")
-            except Exception as _e:
-                st.error(f"⛔ 구글 스프레드시트 불러오기 실패: {_e}")
-                st.stop()
-            # ────────────────────────────────────────────────────────────────
+            repo_files = sorted([str(p) for p in data_dir.glob("*.xlsx")])
+            if repo_files:
+                default_idx = next((i for i, p in enumerate(repo_files)
+                                    if ("상품별공급량" in Path(p).stem) or ("공급량" in Path(p).stem)), 0)
+                file_choice = st.selectbox("📄 실적 파일(Excel)", repo_files, index=default_idx,
+                                           format_func=lambda p: Path(p).name)
+                df = read_excel_sheet(file_choice, prefer_sheet="데이터")
+            else:
+                st.info("📂 data 폴더에 엑셀 파일이 없습니다. 업로드로 진행하세요.")
 
             fc_candidates = [data_dir / "기온예측.xlsx", *[Path(p) for p in glob(str(data_dir / "*기온예측*.xlsx"))]]
             if any(p.exists() for p in fc_candidates):
@@ -407,10 +384,6 @@ def render_supply_forecast():
 
         title_with_icon("🧰", "예측할 상품 선택", "h3", small=True)
         product_cols = guess_product_cols(df)
-        with st.expander("🔍 [디버그] 컬럼 확인", expanded=True):
-            st.write("**전체 컬럼:**", df.columns.tolist())
-            st.write("**dtype:**", {c: str(df[c].dtype) for c in df.columns})
-            st.write("**상품 후보:**", product_cols)
         default_products = [c for c in KNOWN_PRODUCT_ORDER if c in product_cols] or product_cols[:6]
         prods = st.multiselect("📦 상품(용도) 선택", product_cols, default=default_products)
 
