@@ -466,7 +466,17 @@ def render_supply_forecast():
             fut_base.loc[miss2, "추세기온"] = fut_base.loc[miss2, "예상기온"]
         fut_base.drop(columns=[c for c in ["월평균"] if c in fut_base.columns], inplace=True)
 
-        x_train_base = train_df[temp_col].astype(float).values
+        x_train_base = pd.to_numeric(train_df[temp_col], errors="coerce").astype(float).values
+
+        # ── 디버그: NaN 체크 ──
+        _prod_check = prods[0] if prods else None
+        if _prod_check:
+            _col_raw = train_df[_prod_check]
+            _col_num = pd.to_numeric(_col_raw, errors="coerce")
+            _nan_cnt = int(_col_num.isna().sum())
+            _total   = len(_col_num)
+            st.info(f"[디버그] '{_prod_check}' 학습 샘플 {_total}개 중 NaN {_nan_cnt}개 / dtype: {_col_raw.dtype}")
+        # ─────────────────────
 
         st.session_state["supply_materials"] = dict(
             base_df=base, train_df=train_df, prods=prods, x_train=x_train_base,
